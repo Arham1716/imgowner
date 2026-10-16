@@ -1,0 +1,5 @@
+imgowner
+imgowner.exe
+imgowner-report/
+.imgowner.yaml
+*.env
