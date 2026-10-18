@@ -3,3 +3,4 @@
 imgowner-report/
 .imgowner.yaml
 *.env
+*.md
