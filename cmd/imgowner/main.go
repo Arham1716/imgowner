@@ -10,7 +10,11 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Arham1716/imgowner/internal/attribution"
+	"github.com/Arham1716/imgowner/internal/baserec"
 	"github.com/Arham1716/imgowner/internal/config"
+	"github.com/Arham1716/imgowner/internal/dockerfile"
+	"github.com/Arham1716/imgowner/internal/image"
 	"github.com/Arham1716/imgowner/internal/scan"
 )
 
@@ -110,14 +114,65 @@ func attributeCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 			if err != nil {
 				return writeStructuredError(structuredScanErr(err))
 			}
-			_ = trivyVer
-			_ = cfg
-			_ = baseDigest
-			_ = formats
-			_ = baseCandidates
 
-			// TODO M1: wire attribution pipeline
-			fmt.Fprintln(os.Stderr, "attribute: not yet implemented")
+			n := cfg.Scan.BaseCandidates
+			if baseCandidates > 0 {
+				n = baseCandidates
+			}
+
+			// Resolve image digest (FR-01, F3, F4).
+			info, err := image.Resolve(ctx, imageRef, cfg.Scan.Platform)
+			if err != nil {
+				return writeStructuredError(structuredScanErr(err))
+			}
+
+			// Scan image (FR-02); cache keyed by digest+trivyVersion (DQ-1).
+			runner := &scan.Runner{TrivyVersion: trivyVer, Platform: cfg.Scan.Platform}
+			result, err := runner.Scan(ctx, info.Ref, info.Digest)
+			if err != nil {
+				return writeStructuredError(map[string]string{"error": err.Error()})
+			}
+
+			// Parse Dockerfile and build layer map (FR-03).
+			df, err := dockerfile.Parse(dockerfilePath)
+			if err != nil {
+				return writeStructuredError(map[string]string{"error": err.Error()})
+			}
+			finalStage := df.FinalStage()
+			if finalStage == nil {
+				return writeStructuredError(map[string]string{"error": "dockerfile has no stages"})
+			}
+
+			// Fetch image config and build layer map (FR-03).
+			imgCF, err := info.Image.ConfigFile()
+			if err != nil {
+				return writeStructuredError(map[string]string{"error": err.Error()})
+			}
+			layerMap, err := image.BuildLayerMap(imgCF)
+			if err != nil {
+				return writeStructuredError(map[string]string{"error": err.Error()})
+			}
+
+			// Identify base layers (FR-04).
+			baseRef := df.ResolveBaseRef(finalStage)
+			baseCF, err := image.Config(ctx, baseRef, cfg.Scan.Platform)
+			baseLayerCount := 0
+			if err == nil {
+				baseLayerCount, _ = image.BaseLayerCount(imgCF, baseCF)
+			}
+			// On base resolution failure: fall to unattributed (F5/F6 DEFER path).
+
+			// Classify findings (FR-05 through FR-08).
+			findings := attribution.Classify(result.Results, layerMap, baseLayerCount)
+			findings = attribution.MapToDockerfileLines(findings, layerMap)
+
+			// Base image recommendation (FR-09, FR-10, FR-11).
+			candidates, recErr := baserec.Recommend(ctx, baseRef, result, runner, cfg.Scan.Platform, n)
+			_ = recErr // partial failure logged in candidates[i].FailReason
+
+			// Print summary to stdout (full report writer comes in report package).
+			printAttributionSummary(findings, candidates, baseRef)
+			_ = formats
 			return nil
 		},
 	}
@@ -243,7 +298,28 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 	return cmd
 }
 
-// structuredScanErr converts a scan error to a JSON-serialisable map.
+// printAttributionSummary writes a plain-text summary to stdout.
+// The full Markdown/JSON/SARIF writer lives in internal/report (M1 final wire-up).
+func printAttributionSummary(findings []attribution.Finding, candidates []baserec.Candidate, baseRef string) {
+	counts := map[attribution.Owner]int{}
+	for _, f := range findings {
+		counts[f.Owner]++
+	}
+	fmt.Printf("Findings: %d total\n", len(findings))
+	fmt.Printf("  base=%d  added-os=%d  app=%d  unattributed=%d\n",
+		counts[attribution.OwnerBase],
+		counts[attribution.OwnerAddedOS],
+		counts[attribution.OwnerApp],
+		counts[attribution.OwnerUnattributed],
+	)
+	fmt.Printf("Base: %s\n", baseRef)
+	if len(candidates) > 0 && !candidates[0].Failed {
+		fmt.Printf("Recommendation: FROM %s  (removes %d CVEs)\n",
+			candidates[0].Ref, candidates[0].CVEsRemoved)
+	}
+}
+
+// structuredErr converts known error types to a JSON-serialisable map.
 func structuredScanErr(err error) map[string]string {
 	switch e := err.(type) {
 	case *scan.ErrToolMissing:
@@ -253,6 +329,14 @@ func structuredScanErr(err error) map[string]string {
 			"error":    e.Tool + " version too old",
 			"found":    e.Found,
 			"required": e.Required,
+		}
+	case *image.ErrImageNotFound:
+		return map[string]string{"error": "image not found", "ref": e.Ref}
+	case *image.ErrRegistryUnreachable:
+		return map[string]string{
+			"error": "registry unreachable",
+			"host":  e.Host,
+			"cause": e.Cause.Error(),
 		}
 	default:
 		return map[string]string{"error": err.Error()}
