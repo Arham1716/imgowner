@@ -10,7 +10,13 @@ import (
 // Extract parses all RUN instructions in the Dockerfile and returns one Pin per
 // exact-pinned OS package found in apt-get/apt/apk install|add invocations
 // (Story 2.1, FR-12). content is the raw Dockerfile bytes.
-func Extract(content []byte, df *dockerfile.File) ([]Pin, error) {
+// ignorePackages is the list from config.Pins.IgnorePackages; matching pins
+// are silently skipped.
+func Extract(content []byte, df *dockerfile.File, ignorePackages ...string) ([]Pin, error) {
+	ignoreSet := make(map[string]bool, len(ignorePackages))
+	for _, p := range ignorePackages {
+		ignoreSet[p] = true
+	}
 	lineOffsets := buildLineOffsets(content)
 	var pins []Pin
 
@@ -27,7 +33,11 @@ func Extract(content []byte, df *dockerfile.File) ([]Pin, error) {
 			for i := range found {
 				classifyPin(&found[i], stageArgs, thirdParty)
 			}
-			pins = append(pins, found...)
+			for _, p := range found {
+				if !ignoreSet[p.Package] {
+					pins = append(pins, p)
+				}
+			}
 		}
 	}
 	return pins, nil

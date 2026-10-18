@@ -241,10 +241,14 @@ func renderSARIF(w io.Writer, req Request) error {
 	var results []sarifResult
 	for _, f := range req.Findings {
 		level := sarifLevel(f.Severity)
+		line := 1
+		if f.Instruction != nil && f.Instruction.Line > 0 {
+			line = f.Instruction.Line
+		}
 		loc := sarifLocation{
 			PhysicalLocation: sarifPhysical{
 				ArtifactLocation: sarifArtifact{URI: "Dockerfile"},
-				Region:           sarifRegion{StartLine: f.LayerIndex + 1},
+				Region:           sarifRegion{StartLine: line},
 			},
 		}
 		msg := sarifMessage{Text: fmt.Sprintf("%s: %s@%s (owner: %s)", f.CVE, f.Package, f.InstalledVersion, f.Owner)}

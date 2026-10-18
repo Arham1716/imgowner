@@ -28,24 +28,24 @@ const (
 
 // Finding is a single attributed CVE finding.
 type Finding struct {
-	CVE                string
-	Severity           string
-	Package            string
-	InstalledVersion   string
-	FixedVersion       string
-	Class              string
-	LayerDiffID        string
-	LayerIndex         int
-	Owner              Owner
-	UnattributedReason string
-	Instruction        *DockerfileRef
-	Confidence         Confidence
+	CVE                string         `json:"cve"`
+	Severity           string         `json:"severity"`
+	Package            string         `json:"package"`
+	InstalledVersion   string         `json:"installed_version"`
+	FixedVersion       string         `json:"fixed_version"`
+	Class              string         `json:"class"`
+	LayerDiffID        string         `json:"layer_diff_id,omitempty"`
+	LayerIndex         int            `json:"layer_index"`
+	Owner              Owner          `json:"owner"`
+	UnattributedReason string         `json:"unattributed_reason,omitempty"`
+	Instruction        *DockerfileRef `json:"instruction,omitempty"`
+	Confidence         Confidence     `json:"confidence"`
 }
 
 // DockerfileRef points to a specific instruction in the Dockerfile.
 type DockerfileRef struct {
-	Line int
-	Text string
+	Line int    `json:"line"`
+	Text string `json:"text"`
 }
 
 // Classify attributes every Trivy finding to an owner using the layer map and
