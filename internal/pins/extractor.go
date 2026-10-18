@@ -15,15 +15,109 @@ func Extract(content []byte, df *dockerfile.File) ([]Pin, error) {
 	var pins []Pin
 
 	for _, stage := range df.Stages {
+		// Collect stage-level ARG defaults (merged with global defaults).
+		stageArgs := collectStageArgs(&stage, df.Args)
+		thirdParty := detectThirdPartyRepos(&stage)
+
 		for _, instr := range stage.Lines {
 			if !strings.EqualFold(instr.Command, "RUN") {
 				continue
 			}
 			found := extractFromRun(instr.Args, instr.Line, content, lineOffsets, stage.Name)
+			for i := range found {
+				classifyPin(&found[i], stageArgs, thirdParty)
+			}
 			pins = append(pins, found...)
 		}
 	}
 	return pins, nil
+}
+
+// collectStageArgs merges global ARG defaults with any ARG instructions inside
+// the stage itself. Stage-level ARGs shadow global ones.
+func collectStageArgs(stage *dockerfile.Stage, globalArgs map[string]string) map[string]string {
+	merged := make(map[string]string, len(globalArgs))
+	for k, v := range globalArgs {
+		merged[k] = v
+	}
+	for _, instr := range stage.Lines {
+		if !strings.EqualFold(instr.Command, "ARG") {
+			continue
+		}
+		if k, v, hasDefault := parseARGLine(instr.Args); hasDefault {
+			merged[k] = v
+		} else if _, exists := merged[k]; !exists {
+			merged[k] = "" // no default
+		}
+	}
+	return merged
+}
+
+// parseARGLine splits "KEY=VALUE" or "KEY" (mirrors dockerfile.parseARG).
+func parseARGLine(s string) (key, value string, hasDefault bool) {
+	if idx := strings.IndexByte(s, '='); idx >= 0 {
+		return strings.TrimSpace(s[:idx]), strings.TrimSpace(s[idx+1:]), true
+	}
+	return strings.TrimSpace(s), "", false
+}
+
+// detectThirdPartyRepos returns true if the stage adds a custom apt/apk
+// repository source before its install commands, marking all apt-pinned packages
+// in that stage as potentially unsupported (best-effort heuristic).
+func detectThirdPartyRepos(stage *dockerfile.Stage) bool {
+	thirdParty3PIndicators := []string{
+		"add-apt-repository",
+		"apt-key add",
+		"sources.list.d",
+		"apk add --repository",
+		"--repositories-file",
+	}
+	for _, instr := range stage.Lines {
+		if !strings.EqualFold(instr.Command, "RUN") {
+			continue
+		}
+		lower := strings.ToLower(instr.Args)
+		for _, indicator := range thirdParty3PIndicators {
+			if strings.Contains(lower, indicator) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// classifyPin sets StatusVariable or StatusUnsupported when applicable,
+// and resolves ARG-expanded versions where a default exists.
+func classifyPin(p *Pin, stageArgs map[string]string, thirdParty bool) {
+	ver := p.Version
+	if isARGRef(ver) {
+		varName := argVarName(ver)
+		if def, ok := stageArgs[varName]; ok && def != "" {
+			// ARG has a default — resolve and keep as a normal pin.
+			p.Version = def
+		} else {
+			// ARG-only with no default — cannot look up.
+			p.Status = StatusVariable
+		}
+		return
+	}
+	if thirdParty {
+		p.Status = StatusUnsupported
+	}
+}
+
+// isARGRef returns true if the string is a shell variable reference like
+// ${VAR} or $VAR.
+func isARGRef(s string) bool {
+	return strings.HasPrefix(s, "$")
+}
+
+// argVarName extracts the variable name from ${VAR} or $VAR.
+func argVarName(s string) string {
+	s = strings.TrimPrefix(s, "$")
+	s = strings.TrimPrefix(s, "{")
+	s = strings.TrimSuffix(s, "}")
+	return s
 }
 
 // extractFromRun tokenises a RUN instruction's argument string and returns

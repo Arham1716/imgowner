@@ -1,0 +1,38 @@
+name: imgowner
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - .imgowner.yaml
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'  # every Monday at 06:00 UTC
+
+permissions:
+  contents: read
+  security-events: write   # required for SARIF upload
+  pull-requests: write     # required for PR comments
+
+jobs:
+  attribute:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t myapp:${{ github.sha }} .
+
+      - name: Attribute CVEs + check pins
+        uses: Arham1716/imgowner@main
+        with:
+          image: myapp:${{ github.sha }}
+          dockerfile: Dockerfile
+          format: md,json,sarif
+          output-dir: imgowner-report
+          pr-id: ${{ github.event.pull_request.number }}
+          pins-check: 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
