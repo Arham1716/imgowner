@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -22,13 +23,42 @@ import (
 	"github.com/Arham1716/imgowner/internal/scm"
 )
 
+// exitError carries a specific OS exit code through cobra's error path.
+type exitError struct {
+	code int
+	cause error
+}
+
+func (e *exitError) Error() string { return e.cause.Error() }
+func (e *exitError) Unwrap() error { return e.cause }
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	if err := rootCmd(ctx).ExecuteContext(ctx); err != nil {
-		os.Exit(2)
+		var ee *exitError
+		if errors.As(err, &ee) {
+			os.Exit(ee.code)
+		}
+		os.Exit(2) // generic tool/config error
 	}
+}
+
+// toolErr wraps an error as exit-code 2 (tool/config error per spec).
+func toolErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &exitError{code: 2, cause: err}
+}
+
+// policyErr wraps an error as exit-code 1 (policy breach per spec).
+func policyErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &exitError{code: 1, cause: err}
 }
 
 func rootCmd(ctx context.Context) *cobra.Command {
@@ -71,11 +101,11 @@ func loadConfig(ctx context.Context, cfgPath string) (config.Config, string, err
 	return cfg, trivyVer, nil
 }
 
-// writeStructuredError writes a JSON error to stderr and returns a generic error
-// so cobra can exit cleanly without printing the raw message.
+// writeStructuredError writes a JSON error to stderr and returns an exitError
+// with code 2 so the process exits with the correct tool-error code.
 func writeStructuredError(payload any) error {
 	_ = json.NewEncoder(os.Stderr).Encode(payload)
-	return fmt.Errorf("") // cobra prints this if non-empty; keep blank
+	return toolErr(fmt.Errorf("tool error"))
 }
 
 // ── attribute ────────────────────────────────────────────────────────────────
@@ -239,7 +269,7 @@ func pinsCheckCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 				return writeStructuredError(map[string]string{"error": err.Error()})
 			}
 
-			pinList, err := pins.Extract(dfContent, df)
+			pinList, err := pins.Extract(dfContent, df, cfg.Pins.IgnorePackages...)
 			if err != nil {
 				return writeStructuredError(map[string]string{"error": err.Error()})
 			}
@@ -386,7 +416,7 @@ func pinsUpdateCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 				return writeStructuredError(map[string]string{"error": err.Error()})
 			}
 
-			pinList, err := pins.Extract(dfContent, df)
+			pinList, err := pins.Extract(dfContent, df, cfg.Pins.IgnorePackages...)
 			if err != nil {
 				return writeStructuredError(map[string]string{"error": err.Error()})
 			}
@@ -543,6 +573,12 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 			findings := attribution.Classify(result.Results, layerMap, baseLayerCount)
 			findings = attribution.MapToDockerfileLines(findings, layerMap)
 
+			// ── new_only diff (FR-25) ─────────────────────────────────────
+			// Filter to only CVEs that are new relative to the baseline image.
+			if cfg.Policy.NewOnly && baseImageRef != "" {
+				findings = filterNewFindings(ctx, findings, baseImageRef, runner, cfg.Scan.Platform)
+			}
+
 			candidates, _ := baserec.Recommend(ctx, baseRef, result, runner, cfg.Scan.Platform, cfg.Scan.BaseCandidates)
 
 			// ── Policy evaluation (FR-27) ─────────────────────────────────
@@ -586,7 +622,7 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 			}
 
 			if exitCode != 0 {
-				os.Exit(exitCode)
+				return policyErr(fmt.Errorf("policy breach: %d finding(s) at or above configured fail_on threshold", len(findings)))
 			}
 			return nil
 		},
@@ -600,22 +636,69 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 	return cmd
 }
 
-// evaluatePolicy checks findings against the configured fail_on severities (FR-27).
-// Returns 0 (success) or 1 (policy breach).
+// evaluatePolicy checks findings against fail_on severities and enforce_owners
+// (FR-27). Returns 0 (success) or 1 (policy breach).
 func evaluatePolicy(findings []attribution.Finding, cfg config.Config) int {
-	if len(cfg.Policy.FailOn) == 0 {
-		return 0
-	}
-	failSet := make(map[string]bool, len(cfg.Policy.FailOn))
+	failSev := make(map[string]bool, len(cfg.Policy.FailOn))
 	for _, s := range cfg.Policy.FailOn {
-		failSet[strings.ToUpper(s)] = true
+		failSev[strings.ToUpper(s)] = true
 	}
+
+	// enforce_owners: if set, fail when a finding's owner is NOT in the allowed
+	// set AND its severity is in fail_on. Owners not in enforce_owners are
+	// considered exempt (e.g., "base" CVEs are the upstream's problem).
+	enforceSet := make(map[string]bool, len(cfg.Policy.EnforceOwners))
+	for _, o := range cfg.Policy.EnforceOwners {
+		enforceSet[strings.ToLower(o)] = true
+	}
+
 	for _, f := range findings {
-		if failSet[strings.ToUpper(f.Severity)] {
-			return 1
+		if !failSev[strings.ToUpper(f.Severity)] {
+			continue
 		}
+		// If enforce_owners is configured, only fail for owners in the set.
+		if len(enforceSet) > 0 && !enforceSet[strings.ToLower(string(f.Owner))] {
+			continue
+		}
+		return 1
 	}
 	return 0
+}
+
+// filterNewFindings scans baseImageRef and returns only findings whose CVE ID
+// is NOT present in the baseline scan (FR-25 new_only mode).
+func filterNewFindings(
+	ctx context.Context,
+	findings []attribution.Finding,
+	baseImageRef string,
+	runner *scan.Runner,
+	platform string,
+) []attribution.Finding {
+	baseInfo, err := image.Resolve(ctx, baseImageRef, platform)
+	if err != nil {
+		// Can't reach baseline — return all findings (fail open, not closed).
+		return findings
+	}
+	baseResult, err := runner.Scan(ctx, baseInfo.Ref, baseInfo.Digest)
+	if err != nil {
+		return findings
+	}
+
+	// Build CVE set present in the baseline image.
+	baselineCVEs := make(map[string]bool)
+	for _, t := range baseResult.Results {
+		for _, v := range t.Vulnerabilities {
+			baselineCVEs[v.VulnerabilityID] = true
+		}
+	}
+
+	var newOnly []attribution.Finding
+	for _, f := range findings {
+		if !baselineCVEs[f.CVE] {
+			newOnly = append(newOnly, f)
+		}
+	}
+	return newOnly
 }
 
 // printAttributionSummary writes a plain-text summary to stdout.
