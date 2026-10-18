@@ -1,0 +1,120 @@
+name: imgowner
+description: Container CVE attribution and OS package pin updater
+
+inputs:
+  image:
+    description: Image reference to scan (e.g. myregistry/myapp:latest)
+    required: true
+  dockerfile:
+    description: Path to the Dockerfile
+    required: false
+    default: Dockerfile
+  base-image-ref:
+    description: Baseline image ref for new_only diff (required when new_only is set in config)
+    required: false
+    default: ''
+  format:
+    description: Comma-separated report formats (md,json,sarif)
+    required: false
+    default: md,json,sarif
+  output-dir:
+    description: Directory to write report files into
+    required: false
+    default: imgowner-report
+  config:
+    description: Path to .imgowner.yaml config file
+    required: false
+    default: .imgowner.yaml
+  pr-id:
+    description: Pull request number to post attribution comment on
+    required: false
+    default: ''
+  pins-check:
+    description: Run pin version check after attribution
+    required: false
+    default: 'false'
+  trivy-version:
+    description: Trivy version to install (must be >= 0.76.0)
+    required: false
+    default: 0.59.1
+
+outputs:
+  report-dir:
+    description: Directory containing the generated report files
+    value: ${{ steps.run.outputs.report-dir }}
+  findings-count:
+    description: Total number of CVE findings
+    value: ${{ steps.run.outputs.findings-count }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install Trivy
+      shell: bash
+      run: |
+        TRIVY_VER="${{ inputs.trivy-version }}"
+        if ! command -v trivy &>/dev/null; then
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin "v${TRIVY_VER}"
+        fi
+        trivy version
+
+    - name: Install imgowner
+      shell: bash
+      run: |
+        GOOS=linux GOARCH=amd64 go install github.com/Arham1716/imgowner/cmd/imgowner@latest
+      env:
+        GOPATH: /tmp/imgowner-go
+
+    - name: Run imgowner ci
+      id: run
+      shell: bash
+      run: |
+        set -euo pipefail
+        FORMATS=$(echo "${{ inputs.format }}" | tr ',' '\n' | xargs -I{} echo "--format {}" | tr '\n' ' ')
+        BASE_REF=""
+        if [ -n "${{ inputs.base-image-ref }}" ]; then
+          BASE_REF="--base-image-ref ${{ inputs.base-image-ref }}"
+        fi
+        PR_FLAG=""
+        if [ -n "${{ inputs.pr-id }}" ]; then
+          PR_FLAG="--pr-id ${{ inputs.pr-id }}"
+        fi
+
+        /tmp/imgowner-go/bin/imgowner ci \
+          --image "${{ inputs.image }}" \
+          --dockerfile "${{ inputs.dockerfile }}" \
+          --config "${{ inputs.config }}" \
+          --output-dir "${{ inputs.output-dir }}" \
+          $FORMATS $BASE_REF $PR_FLAG
+
+        echo "report-dir=${{ inputs.output-dir }}" >> "$GITHUB_OUTPUT"
+        COUNT=$(jq '.findings | length' "${{ inputs.output-dir }}/imgowner-report.json" 2>/dev/null || echo 0)
+        echo "findings-count=${COUNT}" >> "$GITHUB_OUTPUT"
+      env:
+        GITHUB_TOKEN: ${{ env.GITHUB_TOKEN }}
+        PATH: /tmp/imgowner-go/bin:${{ env.PATH }}
+
+    - name: Upload SARIF
+      if: always()
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ inputs.output-dir }}/imgowner-report.sarif
+        category: imgowner
+
+    - name: Upload report artifacts
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: imgowner-report
+        path: ${{ inputs.output-dir }}/
+
+    - name: Run pin check
+      if: inputs.pins-check == 'true'
+      shell: bash
+      run: |
+        /tmp/imgowner-go/bin/imgowner pins check \
+          --dockerfile "${{ inputs.dockerfile }}" \
+          --config "${{ inputs.config }}"
+      env:
+        PATH: /tmp/imgowner-go/bin:${{ env.PATH }}

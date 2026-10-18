@@ -164,6 +164,73 @@ func TestSanitizeIdentifier(t *testing.T) {
 	}
 }
 
+func TestExtract_VariablePin_NoDefault(t *testing.T) {
+	src := `FROM debian:12-slim
+ARG CURL_VER
+RUN apt-get install -y curl=${CURL_VER}
+`
+	df, err := dockerfile.ParseBytes([]byte(src))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	pins, err := Extract([]byte(src), df)
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	if len(pins) != 1 {
+		t.Fatalf("expected 1 pin, got %d", len(pins))
+	}
+	if pins[0].Status != StatusVariable {
+		t.Errorf("expected StatusVariable, got %s", pins[0].Status)
+	}
+}
+
+func TestExtract_VariablePin_WithDefault(t *testing.T) {
+	src := `FROM debian:12-slim
+ARG CURL_VER=7.88.1-10
+RUN apt-get install -y curl=${CURL_VER}
+`
+	df, err := dockerfile.ParseBytes([]byte(src))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	pins, err := Extract([]byte(src), df)
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	if len(pins) != 1 {
+		t.Fatalf("expected 1 pin, got %d", len(pins))
+	}
+	if pins[0].Status == StatusVariable {
+		t.Error("expected resolved pin (has default), got StatusVariable")
+	}
+	if pins[0].Version != "7.88.1-10" {
+		t.Errorf("expected resolved version 7.88.1-10, got %s", pins[0].Version)
+	}
+}
+
+func TestExtract_ThirdPartyRepo(t *testing.T) {
+	src := `FROM debian:12-slim
+RUN curl -fsSL https://example.com/key.gpg | apt-key add - && \
+    echo "deb https://example.com/apt stable main" > /etc/apt/sources.list.d/custom.list
+RUN apt-get update && apt-get install -y custom-pkg=1.2.3
+`
+	df, err := dockerfile.ParseBytes([]byte(src))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	pins, err := Extract([]byte(src), df)
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	if len(pins) != 1 {
+		t.Fatalf("expected 1 pin, got %d: %+v", len(pins), pins)
+	}
+	if pins[0].Status != StatusUnsupported {
+		t.Errorf("expected StatusUnsupported for third-party repo package, got %s", pins[0].Status)
+	}
+}
+
 func TestApplyCVEFixes(t *testing.T) {
 	pins := []Pin{
 		{Package: "curl", Status: StatusUpdateAvailable},

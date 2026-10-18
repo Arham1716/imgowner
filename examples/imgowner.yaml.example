@@ -1,0 +1,32 @@
+version: 1
+
+scan:
+  platform: linux/amd64
+  trivy_min_version: "0.76.0"
+  timeout: 10m
+  base_candidates: 3
+
+policy:
+  fail_on:
+    - CRITICAL
+    - HIGH
+  enforce_owners: []
+  new_only: false
+
+pins:
+  enabled: true
+  lookup_timeout: 5m
+
+report:
+  formats:
+    - md
+    - json
+    - sarif
+  output_dir: imgowner-report
+
+scm:
+  provider: auto
+  branch_prefix: imgowner/
+  labels:
+    - security
+    - dependencies
