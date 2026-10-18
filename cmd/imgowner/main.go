@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -16,7 +17,9 @@ import (
 	"github.com/Arham1716/imgowner/internal/dockerfile"
 	"github.com/Arham1716/imgowner/internal/image"
 	"github.com/Arham1716/imgowner/internal/pins"
+	"github.com/Arham1716/imgowner/internal/report"
 	"github.com/Arham1716/imgowner/internal/scan"
+	"github.com/Arham1716/imgowner/internal/scm"
 )
 
 func main() {
@@ -171,9 +174,16 @@ func attributeCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 			candidates, recErr := baserec.Recommend(ctx, baseRef, result, runner, cfg.Scan.Platform, n)
 			_ = recErr // partial failure logged in candidates[i].FailReason
 
-			// Print summary to stdout (full report writer comes in report package).
-			printAttributionSummary(findings, candidates, baseRef)
-			_ = formats
+			// Write reports (FR-21, FR-22, FR-23).
+			if err := report.Write(report.Request{
+				Image:      imageRef,
+				BaseRef:    baseRef,
+				Findings:   findings,
+				Candidates: candidates,
+				Formats:    formats,
+			}); err != nil {
+				return writeStructuredError(map[string]string{"error": err.Error()})
+			}
 			return nil
 		},
 	}
@@ -347,7 +357,9 @@ func printPinsSummary(pinList []pins.Pin) {
 func pinsUpdateCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 	var (
 		dockerfilePath string
+		imageRef       string
 		openPR         bool
+		baseBranch     string
 	)
 
 	cmd := &cobra.Command{
@@ -360,62 +372,250 @@ func pinsUpdateCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 					"path":  dockerfilePath,
 				})
 			}
-			_, _, err := loadConfig(ctx, *cfgPath)
+			cfg, _, err := loadConfig(ctx, *cfgPath)
 			if err != nil {
 				return writeStructuredError(structuredScanErr(err))
 			}
-			_ = openPR
 
-			// TODO M4: wire pin update pipeline
-			fmt.Fprintln(os.Stderr, "pins update: not yet implemented")
+			dfContent, err := os.ReadFile(dockerfilePath)
+			if err != nil {
+				return writeStructuredError(map[string]string{"error": err.Error()})
+			}
+			df, err := dockerfile.ParseBytes(dfContent)
+			if err != nil {
+				return writeStructuredError(map[string]string{"error": err.Error()})
+			}
+
+			pinList, err := pins.Extract(dfContent, df)
+			if err != nil {
+				return writeStructuredError(map[string]string{"error": err.Error()})
+			}
+			if len(pinList) == 0 {
+				fmt.Println("No pinned OS packages found.")
+				return nil
+			}
+
+			rt, err := pins.DetectRuntime(ctx)
+			if err != nil {
+				return writeStructuredError(map[string]string{"error": err.Error()})
+			}
+			pinList, err = runPinLookup(ctx, rt, pinList, df, imageRef, cfg)
+			if err != nil {
+				return writeStructuredError(map[string]string{"error": err.Error()})
+			}
+
+			// Apply byte-level edits to Dockerfile (FR-17, Story 3.1).
+			edits := pins.PlanEdits(pinList)
+			if len(edits) == 0 {
+				fmt.Println("All pinned packages are current.")
+				return nil
+			}
+			updated, err := pins.ApplyEdits(dfContent, edits)
+			if err != nil {
+				return writeStructuredError(map[string]string{"error": err.Error()})
+			}
+			if err := pins.WriteDockerfile(dockerfilePath, updated); err != nil {
+				return writeStructuredError(map[string]string{"error": err.Error()})
+			}
+			fmt.Printf("Updated %d pin(s) in %s\n", len(edits), dockerfilePath)
+
+			if !openPR {
+				return nil
+			}
+
+			// Open or update a pull request (Story 3.2, FR-18).
+			provider, _ := scm.Detect(cfg.SCM.Provider)
+			client, err := scm.NewClient(provider)
+			if err != nil {
+				return writeStructuredError(map[string]string{"error": err.Error()})
+			}
+			prBody := buildPinsPRBody(pinList)
+			prURL, err := client.OpenOrUpdatePR(ctx, scm.PRRequest{
+				HeadBranch: "imgowner/pin-updates",
+				BaseBranch: baseBranch,
+				Title:      "chore: update pinned OS package versions",
+				Body:       prBody,
+			})
+			if err != nil {
+				return writeStructuredError(map[string]string{"error": err.Error()})
+			}
+			fmt.Printf("PR: %s\n", prURL)
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&dockerfilePath, "dockerfile", "Dockerfile", "path to Dockerfile")
+	cmd.Flags().StringVar(&imageRef, "image", "", "override base image ref for container lookup")
 	cmd.Flags().BoolVar(&openPR, "open-pr", false, "open a pull request with updates")
+	cmd.Flags().StringVar(&baseBranch, "base-branch", "main", "target branch for the pull request")
 	return cmd
+}
+
+func buildPinsPRBody(pinList []pins.Pin) string {
+	var sb strings.Builder
+	sb.WriteString("## Pinned OS package updates\n\n")
+	sb.WriteString("| Package | Old | New | Status |\n|---|---|---|---|\n")
+	for _, p := range pinList {
+		if p.Status == pins.StatusUpdateAvailable || p.Status == pins.StatusFixesCVEs {
+			sb.WriteString(fmt.Sprintf("| %s | %s | %s | %s |\n", p.Package, p.Version, p.Available, p.Status))
+		}
+	}
+	return sb.String()
 }
 
 // ── ci ────────────────────────────────────────────────────────────────────────
 
 func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 	var (
-		imageRef      string
-		baseImageRef  string
+		imageRef       string
+		baseImageRef   string
 		dockerfilePath string
-		formats       []string
+		formats        []string
+		outputDir      string
+		prID           string
 	)
 
 	cmd := &cobra.Command{
 		Use:   "ci",
 		Short: "Run full attribution + policy evaluation for CI",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, _, err := loadConfig(ctx, *cfgPath)
+			if imageRef == "" {
+				return writeStructuredError(map[string]string{
+					"error": "image reference required",
+					"hint":  "pass --image <ref>",
+				})
+			}
+			if _, err := os.Stat(dockerfilePath); os.IsNotExist(err) {
+				return writeStructuredError(map[string]string{
+					"error": "dockerfile not found",
+					"path":  dockerfilePath,
+				})
+			}
+
+			cfg, trivyVer, err := loadConfig(ctx, *cfgPath)
 			if err != nil {
 				return writeStructuredError(structuredScanErr(err))
 			}
 
-			// FR-25: new_only requires --base-image-ref (F1 gate)
+			// FR-25: new_only requires --base-image-ref (F1 gate).
 			if cfg.Policy.NewOnly && baseImageRef == "" {
 				return writeStructuredError(map[string]string{
 					"error": "new_only requires --base-image-ref",
 					"hint":  "pass the target branch image ref with --base-image-ref",
 				})
 			}
-			_ = imageRef
-			_ = dockerfilePath
-			_ = formats
 
-			// TODO M4: wire full CI pipeline
-			fmt.Fprintln(os.Stderr, "ci: not yet implemented")
+			// ── Attribution pipeline (reuses M1 logic) ────────────────────
+			info, err := image.Resolve(ctx, imageRef, cfg.Scan.Platform)
+			if err != nil {
+				return writeStructuredError(structuredScanErr(err))
+			}
+			runner := &scan.Runner{TrivyVersion: trivyVer, Platform: cfg.Scan.Platform}
+			result, err := runner.Scan(ctx, info.Ref, info.Digest)
+			if err != nil {
+				return writeStructuredError(map[string]string{"error": err.Error()})
+			}
+
+			df, err := dockerfile.Parse(dockerfilePath)
+			if err != nil {
+				return writeStructuredError(map[string]string{"error": err.Error()})
+			}
+			finalStage := df.FinalStage()
+			if finalStage == nil {
+				return writeStructuredError(map[string]string{"error": "dockerfile has no stages"})
+			}
+
+			imgCF, err := info.Image.ConfigFile()
+			if err != nil {
+				return writeStructuredError(map[string]string{"error": err.Error()})
+			}
+			layerMap, err := image.BuildLayerMap(imgCF)
+			if err != nil {
+				return writeStructuredError(map[string]string{"error": err.Error()})
+			}
+
+			baseRef := df.ResolveBaseRef(finalStage)
+			baseCF, baseErr := image.Config(ctx, baseRef, cfg.Scan.Platform)
+			baseLayerCount := 0
+			if baseErr == nil {
+				baseLayerCount, _ = image.BaseLayerCount(imgCF, baseCF)
+			}
+
+			findings := attribution.Classify(result.Results, layerMap, baseLayerCount)
+			findings = attribution.MapToDockerfileLines(findings, layerMap)
+
+			candidates, _ := baserec.Recommend(ctx, baseRef, result, runner, cfg.Scan.Platform, cfg.Scan.BaseCandidates)
+
+			// ── Policy evaluation (FR-27) ─────────────────────────────────
+			exitCode := evaluatePolicy(findings, cfg)
+
+			// ── Report writing (FR-21, FR-22, FR-23) ─────────────────────
+			fmts := formats
+			if len(fmts) == 0 {
+				fmts = cfg.Report.Formats
+			}
+			outDir := outputDir
+			if outDir == "" {
+				outDir = cfg.Report.OutputDir
+			}
+			if err := report.Write(report.Request{
+				Image:      imageRef,
+				BaseRef:    baseRef,
+				Findings:   findings,
+				Candidates: candidates,
+				OutputDir:  outDir,
+				Formats:    fmts,
+			}); err != nil {
+				return writeStructuredError(map[string]string{"error": err.Error()})
+			}
+
+			// ── SCM comment (FR-24) ───────────────────────────────────────
+			if prID != "" {
+				provider, _ := scm.Detect(cfg.SCM.Provider)
+				client, scmErr := scm.NewClient(provider)
+				if scmErr == nil {
+					var commentBuf strings.Builder
+					_ = report.WriteToWriter(&commentBuf, report.Request{
+						Image:      imageRef,
+						BaseRef:    baseRef,
+						Findings:   findings,
+						Candidates: candidates,
+						Formats:    []string{"md"},
+					})
+					_ = client.EnsureComment(ctx, prID, commentBuf.String())
+				}
+			}
+
+			if exitCode != 0 {
+				os.Exit(exitCode)
+			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&imageRef, "image", "", "image reference to scan (required)")
 	cmd.Flags().StringVar(&baseImageRef, "base-image-ref", "", "baseline image ref for new_only diff")
 	cmd.Flags().StringVar(&dockerfilePath, "dockerfile", "Dockerfile", "path to Dockerfile")
-	cmd.Flags().StringArrayVar(&formats, "format", []string{"md", "json"}, "output formats")
+	cmd.Flags().StringArrayVar(&formats, "format", nil, "output formats (md,json,sarif); overrides config")
+	cmd.Flags().StringVar(&outputDir, "output-dir", "", "directory for report files; overrides config")
+	cmd.Flags().StringVar(&prID, "pr-id", "", "PR number/ID to post attribution comment on")
 	return cmd
+}
+
+// evaluatePolicy checks findings against the configured fail_on severities (FR-27).
+// Returns 0 (success) or 1 (policy breach).
+func evaluatePolicy(findings []attribution.Finding, cfg config.Config) int {
+	if len(cfg.Policy.FailOn) == 0 {
+		return 0
+	}
+	failSet := make(map[string]bool, len(cfg.Policy.FailOn))
+	for _, s := range cfg.Policy.FailOn {
+		failSet[strings.ToUpper(s)] = true
+	}
+	for _, f := range findings {
+		if failSet[strings.ToUpper(f.Severity)] {
+			return 1
+		}
+	}
+	return 0
 }
 
 // printAttributionSummary writes a plain-text summary to stdout.
