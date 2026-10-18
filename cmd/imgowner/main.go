@@ -15,6 +15,7 @@ import (
 	"github.com/Arham1716/imgowner/internal/config"
 	"github.com/Arham1716/imgowner/internal/dockerfile"
 	"github.com/Arham1716/imgowner/internal/image"
+	"github.com/Arham1716/imgowner/internal/pins"
 	"github.com/Arham1716/imgowner/internal/scan"
 )
 
@@ -198,7 +199,10 @@ func pinsCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 }
 
 func pinsCheckCmd(ctx context.Context, cfgPath *string) *cobra.Command {
-	var dockerfilePath string
+	var (
+		dockerfilePath string
+		imageRef       string
+	)
 
 	cmd := &cobra.Command{
 		Use:   "check",
@@ -210,18 +214,134 @@ func pinsCheckCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 					"path":  dockerfilePath,
 				})
 			}
-			_, _, err := loadConfig(ctx, *cfgPath)
+			cfg, _, err := loadConfig(ctx, *cfgPath)
 			if err != nil {
 				return writeStructuredError(structuredScanErr(err))
 			}
 
-			// TODO M3: wire pin analysis pipeline
-			fmt.Fprintln(os.Stderr, "pins check: not yet implemented")
+			// Parse Dockerfile and extract pinned packages (Story 2.1, FR-12).
+			dfContent, err := os.ReadFile(dockerfilePath)
+			if err != nil {
+				return writeStructuredError(map[string]string{"error": err.Error()})
+			}
+			df, err := dockerfile.ParseBytes(dfContent)
+			if err != nil {
+				return writeStructuredError(map[string]string{"error": err.Error()})
+			}
+
+			pinList, err := pins.Extract(dfContent, df)
+			if err != nil {
+				return writeStructuredError(map[string]string{"error": err.Error()})
+			}
+			if len(pinList) == 0 {
+				fmt.Println("No pinned OS packages found.")
+				return nil
+			}
+
+			// Version lookup via container run (Story 2.2, FR-14, FR-15).
+			rt, err := pins.DetectRuntime(ctx)
+			if err != nil {
+				return writeStructuredError(map[string]string{
+					"error": err.Error(),
+					"hint":  "install docker or podman to enable pin version lookup",
+				})
+			}
+
+			// Group pins by stage; resolve each stage's base image ref.
+			pinList, err = runPinLookup(ctx, rt, pinList, df, imageRef, cfg)
+			if err != nil {
+				return writeStructuredError(map[string]string{"error": err.Error()})
+			}
+
+			printPinsSummary(pinList)
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&dockerfilePath, "dockerfile", "Dockerfile", "path to Dockerfile")
+	cmd.Flags().StringVar(&imageRef, "image", "", "override the base image ref for container lookup")
 	return cmd
+}
+
+// runPinLookup calls LookupVersions for each stage group (FR-15: one container per stage).
+func runPinLookup(
+	ctx context.Context,
+	rt pins.Runtime,
+	pinList []pins.Pin,
+	df *dockerfile.File,
+	imageRefOverride string,
+	cfg config.Config,
+) ([]pins.Pin, error) {
+	// Group by stage name.
+	type group struct {
+		ref  string
+		idxs []int
+	}
+	groups := make(map[string]*group)
+	for i, p := range pinList {
+		if groups[p.Stage] == nil {
+			// Resolve the base image ref for this stage.
+			ref := imageRefOverride
+			if ref == "" {
+				for _, s := range df.Stages {
+					if s.Name == p.Stage {
+						ref = df.ResolveBaseRef(&s)
+						break
+					}
+				}
+			}
+			// No ref resolved — skip this stage (best effort).
+			_ = cfg
+			groups[p.Stage] = &group{ref: ref}
+		}
+		groups[p.Stage].idxs = append(groups[p.Stage].idxs, i)
+	}
+
+	for _, g := range groups {
+		if g.ref == "" {
+			continue
+		}
+		stgPins := make([]pins.Pin, len(g.idxs))
+		for j, idx := range g.idxs {
+			stgPins[j] = pinList[idx]
+		}
+		updated, err := pins.LookupVersions(ctx, rt, g.ref, stgPins)
+		if err != nil {
+			return pinList, err
+		}
+		for j, idx := range g.idxs {
+			pinList[idx] = updated[j]
+		}
+	}
+	return pinList, nil
+}
+
+func printPinsSummary(pinList []pins.Pin) {
+	counts := map[pins.Status]int{}
+	for _, p := range pinList {
+		counts[p.Status]++
+	}
+	fmt.Printf("Pinned packages: %d\n", len(pinList))
+	fmt.Printf("  current=%d  update-available=%d  fixes-CVE(s)=%d  unavailable=%d  unknown=%d\n",
+		counts[pins.StatusCurrent],
+		counts[pins.StatusUpdateAvailable],
+		counts[pins.StatusFixesCVEs],
+		counts[pins.StatusUnavailable],
+		counts[pins.StatusUnknown],
+	)
+	for _, p := range pinList {
+		switch p.Status {
+		case pins.StatusUpdateAvailable:
+			fmt.Printf("  UPDATE   %-30s %s → %s (line %d)\n", p.Package, p.Version, p.Available, p.Line)
+		case pins.StatusFixesCVEs:
+			fmt.Printf("  FIX-CVE  %-30s %s → %s (line %d) [%d CVE(s)]\n", p.Package, p.Version, p.Available, p.Line, len(p.FixesCVEs))
+		case pins.StatusUnavailable:
+			fmt.Printf("  MISSING  %-30s %s (line %d)\n", p.Package, p.Version, p.Line)
+		case pins.StatusCurrent:
+			fmt.Printf("  OK       %-30s %s (line %d)\n", p.Package, p.Version, p.Line)
+		default:
+			fmt.Printf("  UNKNOWN  %-30s %s (line %d)\n", p.Package, p.Version, p.Line)
+		}
+	}
 }
 
 func pinsUpdateCmd(ctx context.Context, cfgPath *string) *cobra.Command {

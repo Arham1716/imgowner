@@ -1,0 +1,155 @@
+package pins
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"strings"
+	"time"
+)
+
+const lookupTimeout = 5 * time.Minute
+
+// LookupVersions runs one container per stage to query the available versions
+// of all pinned packages in that stage (FR-14, FR-15).
+// It populates Pin.Available and sets Status to StatusUnavailable if the
+// package is absent from the repo.
+func LookupVersions(ctx context.Context, rt Runtime, imageRef string, pins []Pin) ([]Pin, error) {
+	if len(pins) == 0 {
+		return pins, nil
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, lookupTimeout)
+	defer cancel()
+
+	// Determine package manager from the first pin (all pins in a stage share one manager).
+	mgr := pins[0].Manager
+
+	script, err := buildLookupScript(mgr, pins)
+	if err != nil {
+		return pins, fmt.Errorf("pins: building lookup script for %s: %w", mgr, err)
+	}
+
+	cmd := rt.Run(ctx, "run", "--rm", "--entrypoint", "sh", imageRef, "-c", script)
+	out, err := cmd.Output()
+	if err != nil {
+		// Mark all as unknown — non-fatal (design F16 DEFER path).
+		for i := range pins {
+			pins[i].Status = StatusUnknown
+		}
+		return pins, nil
+	}
+
+	return parseLookupOutput(out, pins), nil
+}
+
+// buildLookupScript produces a shell script that outputs one line per package:
+//
+//	CURRENT:<pkg>:<pinned>:<latest>
+//	UPDATE:<pkg>:<pinned>:<latest>
+//	UNAVAILABLE:<pkg>
+//
+// FR-15: batched into a single container run per stage.
+func buildLookupScript(mgr string, pins []Pin) (string, error) {
+	var b strings.Builder
+
+	switch mgr {
+	case "apt":
+		b.WriteString("apt-get update -qq 2>/dev/null; ")
+		for _, p := range pins {
+			// Escape package name for shell safety (packages can contain letters, digits, +, -, .).
+			pkg := sanitizeIdentifier(p.Package)
+			pin := sanitizeVersion(p.Version)
+			fmt.Fprintf(&b,
+				`LATEST=$(apt-cache madison %s 2>/dev/null | awk -F'|' 'NR==1{gsub(/ /,"",$2);print $2}'); `+
+					`if [ -z "$LATEST" ]; then echo "UNAVAILABLE:%s"; `+
+					`elif dpkg --compare-versions "$LATEST" gt "%s" 2>/dev/null; then echo "UPDATE:%s:%s:$LATEST"; `+
+					`else echo "CURRENT:%s:%s:$LATEST"; fi; `,
+				pkg, pkg, pin, pkg, pin, pkg, pin,
+			)
+		}
+
+	case "apk":
+		b.WriteString("apk update -q 2>/dev/null; ")
+		for _, p := range pins {
+			pkg := sanitizeIdentifier(p.Package)
+			pin := sanitizeVersion(p.Version)
+			// apk search returns "pkgname-version"; strip the prefix to get version.
+			fmt.Fprintf(&b,
+				`LATEST=$(apk search -q "^%s" 2>/dev/null | grep "^%s-[0-9]" | sort -V | tail -1 | sed "s/^%s-//"); `+
+					`if [ -z "$LATEST" ]; then echo "UNAVAILABLE:%s"; `+
+					`elif apk version -t "$LATEST" "%s" 2>/dev/null | grep -q ">"; then echo "UPDATE:%s:%s:$LATEST"; `+
+					`else echo "CURRENT:%s:%s:$LATEST"; fi; `,
+				pkg, pkg, pkg, pkg, pin, pkg, pin, pkg, pin,
+			)
+		}
+
+	default:
+		return "", fmt.Errorf("unsupported package manager %q", mgr)
+	}
+
+	return b.String(), nil
+}
+
+// parseLookupOutput reads the container script's stdout and updates pin statuses.
+func parseLookupOutput(out []byte, pins []Pin) []Pin {
+	// Build a lookup map by package name for O(1) updates.
+	byPkg := make(map[string]*Pin, len(pins))
+	for i := range pins {
+		byPkg[pins[i].Package] = &pins[i]
+	}
+
+	for _, line := range bytes.Split(bytes.TrimSpace(out), []byte("\n")) {
+		parts := strings.SplitN(string(line), ":", 4)
+		if len(parts) < 2 {
+			continue
+		}
+		kind, pkg := parts[0], parts[1]
+		p, ok := byPkg[pkg]
+		if !ok {
+			continue
+		}
+
+		switch kind {
+		case "UNAVAILABLE":
+			p.Status = StatusUnavailable
+		case "CURRENT":
+			if len(parts) == 4 {
+				p.Available = parts[3]
+			}
+			p.Status = StatusCurrent
+		case "UPDATE":
+			if len(parts) == 4 {
+				p.Available = parts[3]
+			}
+			p.Status = StatusUpdateAvailable
+		}
+	}
+
+	// Any pin not updated by the output stays StatusUnknown.
+	return pins
+}
+
+// sanitizeIdentifier allows only characters valid in apt/apk package names.
+func sanitizeIdentifier(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '-' || r == '+' || r == '.' || r == '_' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// sanitizeVersion allows only characters valid in Debian/Alpine version strings.
+func sanitizeVersion(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '.' || r == '-' || r == '+' || r == ':' || r == '~' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
