@@ -49,11 +49,15 @@ type DockerfileRef struct {
 }
 
 // Classify attributes every Trivy finding to an owner using the layer map and
-// base layer count (FR-05, FR-07, FR-08).
+// the resolved base image boundary (FR-05, FR-07, FR-08).
+//
+// When base.Confident is false the layer boundary is unknown, so every finding
+// is reported as unattributed with the reason. Guessing an owner here would
+// silently blame the wrong team for vulnerabilities they do not control.
 func Classify(
 	results []scan.TargetResult,
 	layerMap image.LayerMap,
-	baseLayerCount int,
+	base *image.BaseResolution,
 ) []Finding {
 	var findings []Finding
 
@@ -82,7 +86,13 @@ func Classify(
 			f.LayerIndex = entry.Index
 
 			switch {
-			case entry.Index < baseLayerCount:
+			case base == nil || !base.Confident:
+				// The base/added-os split is derived entirely from layer position,
+				// so an unverified boundary makes every owner a guess (FR-06).
+				f.Owner = OwnerUnattributed
+				f.UnattributedReason = "base image boundary unverified: " + baseReason(base)
+
+			case entry.Index < base.LayerCount:
 				// Layer is part of the base image (FR-05).
 				f.Owner = OwnerBase
 
@@ -108,6 +118,16 @@ func Classify(
 
 func isOSPkgs(class string) bool  { return strings.EqualFold(class, "os-pkgs") }
 func isLangPkgs(class string) bool { return strings.EqualFold(class, "lang-pkgs") }
+
+func baseReason(base *image.BaseResolution) string {
+	if base == nil {
+		return "base image was not resolved"
+	}
+	if base.Reason == "" {
+		return "no reason recorded"
+	}
+	return base.Reason
+}
 
 func unattributedReason(diffID string) string {
 	if diffID == "" {

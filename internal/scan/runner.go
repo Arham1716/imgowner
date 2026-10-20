@@ -3,8 +3,10 @@ package scan
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
+	"time"
 )
 
 // Result is the top-level Trivy JSON output for an image scan.
@@ -61,6 +63,7 @@ type Layer struct {
 type Runner struct {
 	TrivyVersion string
 	Platform     string
+	Timeout      time.Duration // per-scan ceiling; zero means no limit
 }
 
 // Scan runs Trivy against imageRef (must be digest-pinned) and returns the
@@ -75,6 +78,12 @@ func (r *Runner) Scan(ctx context.Context, imageRef, digest string) (*Result, er
 		}
 	}
 
+	if r.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, r.Timeout)
+		defer cancel()
+	}
+
 	// Run Trivy. --scanners vuln is unconditional (FR-02).
 	args := []string{
 		"image",
@@ -87,6 +96,14 @@ func (r *Runner) Scan(ctx context.Context, imageRef, digest string) (*Result, er
 	cmd := exec.CommandContext(ctx, "trivy", args...)
 	raw, err := cmd.Output()
 	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("imgowner: trivy scan for %s timed out after %s", imageRef, r.Timeout)
+		}
+		// Trivy writes diagnostics to stderr; surface them instead of a bare exit code.
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+			return nil, fmt.Errorf("imgowner: trivy scan failed for %s: %s", imageRef, trimStderr(ee.Stderr))
+		}
 		return nil, fmt.Errorf("imgowner: trivy scan failed for %s: %w", imageRef, err)
 	}
 
@@ -98,4 +115,14 @@ func (r *Runner) Scan(ctx context.Context, imageRef, digest string) (*Result, er
 		return nil, fmt.Errorf("imgowner: parsing trivy output: %w", err)
 	}
 	return &res, nil
+}
+
+// trimStderr caps Trivy's stderr so a runaway log cannot flood the error path.
+func trimStderr(b []byte) string {
+	const max = 2000
+	s := string(b)
+	if len(s) > max {
+		return s[:max] + "… (truncated)"
+	}
+	return s
 }

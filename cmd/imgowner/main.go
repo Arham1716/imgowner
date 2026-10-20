@@ -161,7 +161,11 @@ func attributeCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 			}
 
 			// Scan image (FR-02); cache keyed by digest+trivyVersion (DQ-1).
-			runner := &scan.Runner{TrivyVersion: trivyVer, Platform: cfg.Scan.Platform}
+			runner := &scan.Runner{
+				TrivyVersion: trivyVer,
+				Platform:     cfg.Scan.Platform,
+				Timeout:      cfg.Scan.Timeout(),
+			}
 			result, err := runner.Scan(ctx, info.Ref, info.Digest)
 			if err != nil {
 				return writeStructuredError(map[string]string{"error": err.Error()})
@@ -187,17 +191,13 @@ func attributeCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 				return writeStructuredError(map[string]string{"error": err.Error()})
 			}
 
-			// Identify base layers (FR-04).
+			// Identify base layers (FR-04). A failure here is reported, never guessed.
 			baseRef := df.ResolveBaseRef(finalStage)
-			baseCF, err := image.Config(ctx, baseRef, cfg.Scan.Platform)
-			baseLayerCount := 0
-			if err == nil {
-				baseLayerCount, _ = image.BaseLayerCount(imgCF, baseCF)
-			}
-			// On base resolution failure: fall to unattributed (F5/F6 DEFER path).
+			base := image.ResolveBase(ctx, imgCF, baseRef, baseDigest, cfg.Scan.Platform)
+			warnIfBaseUnresolved(base)
 
 			// Classify findings (FR-05 through FR-08).
-			findings := attribution.Classify(result.Results, layerMap, baseLayerCount)
+			findings := attribution.Classify(result.Results, layerMap, base)
 			findings = attribution.MapToDockerfileLines(findings, layerMap)
 
 			// Base image recommendation (FR-09, FR-10, FR-11).
@@ -496,12 +496,14 @@ func buildPinsPRBody(pinList []pins.Pin) string {
 
 func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 	var (
-		imageRef       string
-		baseImageRef   string
-		dockerfilePath string
-		formats        []string
-		outputDir      string
-		prID           string
+		imageRef           string
+		baseImageRef       string
+		baseDigest         string
+		dockerfilePath     string
+		formats            []string
+		outputDir          string
+		prID               string
+		failOnBaseMismatch bool
 	)
 
 	cmd := &cobra.Command{
@@ -539,7 +541,11 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 			if err != nil {
 				return writeStructuredError(structuredScanErr(err))
 			}
-			runner := &scan.Runner{TrivyVersion: trivyVer, Platform: cfg.Scan.Platform}
+			runner := &scan.Runner{
+				TrivyVersion: trivyVer,
+				Platform:     cfg.Scan.Platform,
+				Timeout:      cfg.Scan.Timeout(),
+			}
 			result, err := runner.Scan(ctx, info.Ref, info.Digest)
 			if err != nil {
 				return writeStructuredError(map[string]string{"error": err.Error()})
@@ -564,13 +570,17 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 			}
 
 			baseRef := df.ResolveBaseRef(finalStage)
-			baseCF, baseErr := image.Config(ctx, baseRef, cfg.Scan.Platform)
-			baseLayerCount := 0
-			if baseErr == nil {
-				baseLayerCount, _ = image.BaseLayerCount(imgCF, baseCF)
+			base := image.ResolveBase(ctx, imgCF, baseRef, baseDigest, cfg.Scan.Platform)
+			warnIfBaseUnresolved(base)
+			if !base.Confident && failOnBaseMismatch {
+				return writeStructuredError(map[string]string{
+					"error":  "base image boundary could not be verified",
+					"reason": base.Reason,
+					"hint":   "pass --base-digest sha256:... or set --fail-on-base-mismatch=false to continue",
+				})
 			}
 
-			findings := attribution.Classify(result.Results, layerMap, baseLayerCount)
+			findings := attribution.Classify(result.Results, layerMap, base)
 			findings = attribution.MapToDockerfileLines(findings, layerMap)
 
 			// ── new_only diff (FR-25) ─────────────────────────────────────
@@ -629,11 +639,25 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&imageRef, "image", "", "image reference to scan (required)")
 	cmd.Flags().StringVar(&baseImageRef, "base-image-ref", "", "baseline image ref for new_only diff")
+	cmd.Flags().StringVar(&baseDigest, "base-digest", "", "digest of the base image used at build time (sha256:...)")
 	cmd.Flags().StringVar(&dockerfilePath, "dockerfile", "Dockerfile", "path to Dockerfile")
 	cmd.Flags().StringArrayVar(&formats, "format", nil, "output formats (md,json,sarif); overrides config")
 	cmd.Flags().StringVar(&outputDir, "output-dir", "", "directory for report files; overrides config")
 	cmd.Flags().StringVar(&prID, "pr-id", "", "PR number/ID to post attribution comment on")
+	cmd.Flags().BoolVar(&failOnBaseMismatch, "fail-on-base-mismatch", true,
+		"exit with an error when the base image boundary cannot be verified")
 	return cmd
+}
+
+// warnIfBaseUnresolved prints an actionable warning when attribution had to fall
+// back to unattributed because the base image boundary could not be verified.
+func warnIfBaseUnresolved(base *image.BaseResolution) {
+	if base == nil || base.Confident {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"warning: base image boundary could not be verified — all findings will be reported as "+
+			"unattributed.\n  reason: %s\n", base.Reason)
 }
 
 // evaluatePolicy checks findings against fail_on severities and enforce_owners
