@@ -13,11 +13,11 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Arham1716/imgowner/internal/attribution"
-	"github.com/Arham1716/imgowner/internal/baserec"
 	"github.com/Arham1716/imgowner/internal/config"
 	"github.com/Arham1716/imgowner/internal/dockerfile"
 	"github.com/Arham1716/imgowner/internal/image"
 	"github.com/Arham1716/imgowner/internal/pins"
+	"github.com/Arham1716/imgowner/internal/pipeline"
 	"github.com/Arham1716/imgowner/internal/report"
 	"github.com/Arham1716/imgowner/internal/scan"
 	"github.com/Arham1716/imgowner/internal/scm"
@@ -154,62 +154,26 @@ func attributeCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 				n = baseCandidates
 			}
 
-			// Resolve image digest (FR-01, F3, F4).
-			info, err := image.Resolve(ctx, imageRef, cfg.Scan.Platform)
+			res, err := pipeline.Attribute(ctx, pipeline.AttributeRequest{
+				ImageRef:       imageRef,
+				DockerfilePath: dockerfilePath,
+				BaseDigest:     baseDigest,
+				Platform:       cfg.Scan.Platform,
+				TrivyVersion:   trivyVer,
+				Timeout:        cfg.Scan.Timeout(),
+				BaseCandidates: n,
+			})
 			if err != nil {
 				return writeStructuredError(structuredScanErr(err))
 			}
-
-			// Scan image (FR-02); cache keyed by digest+trivyVersion (DQ-1).
-			runner := &scan.Runner{
-				TrivyVersion: trivyVer,
-				Platform:     cfg.Scan.Platform,
-				Timeout:      cfg.Scan.Timeout(),
-			}
-			result, err := runner.Scan(ctx, info.Ref, info.Digest)
-			if err != nil {
-				return writeStructuredError(map[string]string{"error": err.Error()})
-			}
-
-			// Parse Dockerfile and build layer map (FR-03).
-			df, err := dockerfile.Parse(dockerfilePath)
-			if err != nil {
-				return writeStructuredError(map[string]string{"error": err.Error()})
-			}
-			finalStage := df.FinalStage()
-			if finalStage == nil {
-				return writeStructuredError(map[string]string{"error": "dockerfile has no stages"})
-			}
-
-			// Fetch image config and build layer map (FR-03).
-			imgCF, err := info.Image.ConfigFile()
-			if err != nil {
-				return writeStructuredError(map[string]string{"error": err.Error()})
-			}
-			layerMap, err := image.BuildLayerMap(imgCF)
-			if err != nil {
-				return writeStructuredError(map[string]string{"error": err.Error()})
-			}
-
-			// Identify base layers (FR-04). A failure here is reported, never guessed.
-			baseRef := df.ResolveBaseRef(finalStage)
-			base := image.ResolveBase(ctx, imgCF, baseRef, baseDigest, cfg.Scan.Platform)
-			warnIfBaseUnresolved(base)
-
-			// Classify findings (FR-05 through FR-08).
-			findings := attribution.Classify(result.Results, layerMap, base)
-			findings = attribution.MapToDockerfileLines(findings, layerMap)
-
-			// Base image recommendation (FR-09, FR-10, FR-11).
-			candidates, recErr := baserec.Recommend(ctx, baseRef, result, runner, cfg.Scan.Platform, n)
-			_ = recErr // partial failure logged in candidates[i].FailReason
+			warnIfBaseUnresolved(res.Base)
 
 			// Write reports (FR-21, FR-22, FR-23).
 			if err := report.Write(report.Request{
 				Image:      imageRef,
-				BaseRef:    baseRef,
-				Findings:   findings,
-				Candidates: candidates,
+				BaseRef:    res.BaseRef,
+				Findings:   res.Findings,
+				Candidates: res.Candidates,
 				Formats:    formats,
 			}); err != nil {
 				return writeStructuredError(map[string]string{"error": err.Error()})
@@ -536,60 +500,42 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 				})
 			}
 
-			// ── Attribution pipeline (reuses M1 logic) ────────────────────
-			info, err := image.Resolve(ctx, imageRef, cfg.Scan.Platform)
+			// ── Attribution pipeline ──────────────────────────────────────
+			res, err := pipeline.Attribute(ctx, pipeline.AttributeRequest{
+				ImageRef:       imageRef,
+				DockerfilePath: dockerfilePath,
+				BaseDigest:     baseDigest,
+				Platform:       cfg.Scan.Platform,
+				TrivyVersion:   trivyVer,
+				Timeout:        cfg.Scan.Timeout(),
+				BaseCandidates: cfg.Scan.BaseCandidates,
+			})
 			if err != nil {
 				return writeStructuredError(structuredScanErr(err))
 			}
-			runner := &scan.Runner{
-				TrivyVersion: trivyVer,
-				Platform:     cfg.Scan.Platform,
-				Timeout:      cfg.Scan.Timeout(),
-			}
-			result, err := runner.Scan(ctx, info.Ref, info.Digest)
-			if err != nil {
-				return writeStructuredError(map[string]string{"error": err.Error()})
-			}
-
-			df, err := dockerfile.Parse(dockerfilePath)
-			if err != nil {
-				return writeStructuredError(map[string]string{"error": err.Error()})
-			}
-			finalStage := df.FinalStage()
-			if finalStage == nil {
-				return writeStructuredError(map[string]string{"error": "dockerfile has no stages"})
-			}
-
-			imgCF, err := info.Image.ConfigFile()
-			if err != nil {
-				return writeStructuredError(map[string]string{"error": err.Error()})
-			}
-			layerMap, err := image.BuildLayerMap(imgCF)
-			if err != nil {
-				return writeStructuredError(map[string]string{"error": err.Error()})
-			}
-
-			baseRef := df.ResolveBaseRef(finalStage)
-			base := image.ResolveBase(ctx, imgCF, baseRef, baseDigest, cfg.Scan.Platform)
-			warnIfBaseUnresolved(base)
-			if !base.Confident && failOnBaseMismatch {
+			warnIfBaseUnresolved(res.Base)
+			if !res.Base.Confident && failOnBaseMismatch {
 				return writeStructuredError(map[string]string{
 					"error":  "base image boundary could not be verified",
-					"reason": base.Reason,
+					"reason": res.Base.Reason,
 					"hint":   "pass --base-digest sha256:... or set --fail-on-base-mismatch=false to continue",
 				})
 			}
 
-			findings := attribution.Classify(result.Results, layerMap, base)
-			findings = attribution.MapToDockerfileLines(findings, layerMap)
+			baseRef := res.BaseRef
+			findings := res.Findings
+			candidates := res.Candidates
 
 			// ── new_only diff (FR-25) ─────────────────────────────────────
 			// Filter to only CVEs that are new relative to the baseline image.
 			if cfg.Policy.NewOnly && baseImageRef != "" {
+				runner := &scan.Runner{
+					TrivyVersion: trivyVer,
+					Platform:     cfg.Scan.Platform,
+					Timeout:      cfg.Scan.Timeout(),
+				}
 				findings = filterNewFindings(ctx, findings, baseImageRef, runner, cfg.Scan.Platform)
 			}
-
-			candidates, _ := baserec.Recommend(ctx, baseRef, result, runner, cfg.Scan.Platform, cfg.Scan.BaseCandidates)
 
 			// ── Policy evaluation (FR-27) ─────────────────────────────────
 			exitCode := evaluatePolicy(findings, cfg)
@@ -723,27 +669,6 @@ func filterNewFindings(
 		}
 	}
 	return newOnly
-}
-
-// printAttributionSummary writes a plain-text summary to stdout.
-// The full Markdown/JSON/SARIF writer lives in internal/report (M1 final wire-up).
-func printAttributionSummary(findings []attribution.Finding, candidates []baserec.Candidate, baseRef string) {
-	counts := map[attribution.Owner]int{}
-	for _, f := range findings {
-		counts[f.Owner]++
-	}
-	fmt.Printf("Findings: %d total\n", len(findings))
-	fmt.Printf("  base=%d  added-os=%d  app=%d  unattributed=%d\n",
-		counts[attribution.OwnerBase],
-		counts[attribution.OwnerAddedOS],
-		counts[attribution.OwnerApp],
-		counts[attribution.OwnerUnattributed],
-	)
-	fmt.Printf("Base: %s\n", baseRef)
-	if len(candidates) > 0 && !candidates[0].Failed {
-		fmt.Printf("Recommendation: FROM %s  (removes %d CVEs)\n",
-			candidates[0].Ref, candidates[0].CVEsRemoved)
-	}
 }
 
 // structuredErr converts known error types to a JSON-serialisable map.
