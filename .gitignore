@@ -3,4 +3,9 @@
 imgowner-report/
 .imgowner.yaml
 *.env
+
+# goreleaser build output
+/dist/
+
+# Local notes and scratch docs; README.md is force-added.
 *.md

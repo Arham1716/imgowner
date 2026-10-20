@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -83,6 +84,26 @@ func Defaults() Config {
 			BranchPrefix: "fix/os-pins",
 		},
 	}
+}
+
+// Timeout returns the per-scan ceiling parsed from scan.timeout.
+// An unparseable or absent value yields 10m so a bad config cannot turn into
+// an unbounded scan.
+func (s Scan) Timeout() time.Duration {
+	d, err := time.ParseDuration(s.TimeoutStr)
+	if err != nil || d <= 0 {
+		return 10 * time.Minute
+	}
+	return d
+}
+
+// LookupDuration returns the per-stage container lookup ceiling from pins.lookup_timeout.
+func (p Pins) LookupDuration() time.Duration {
+	d, err := time.ParseDuration(p.LookupTimeout)
+	if err != nil || d <= 0 {
+		return 5 * time.Minute
+	}
+	return d
 }
 
 // Load reads the config file at path (if it exists) and merges it over
