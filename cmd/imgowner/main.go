@@ -25,7 +25,7 @@ import (
 
 // exitError carries a specific OS exit code through cobra's error path.
 type exitError struct {
-	code int
+	code  int
 	cause error
 }
 
@@ -112,10 +112,10 @@ func writeStructuredError(payload any) error {
 
 func attributeCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 	var (
-		imageRef     string
+		imageRef       string
 		dockerfilePath string
-		baseDigest   string
-		formats      []string
+		baseDigest     string
+		formats        []string
 		baseCandidates int
 	)
 

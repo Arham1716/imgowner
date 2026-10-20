@@ -141,12 +141,12 @@ func renderMarkdown(w io.Writer, req Request) error {
 // ── JSON ──────────────────────────────────────────────────────────────────────
 
 type jsonReport struct {
-	GeneratedAt string               `json:"generated_at"`
-	Image       string               `json:"image"`
-	BaseRef     string               `json:"base_ref"`
+	GeneratedAt string                `json:"generated_at"`
+	Image       string                `json:"image"`
+	BaseRef     string                `json:"base_ref"`
 	Findings    []attribution.Finding `json:"findings"`
-	Candidates  []baserec.Candidate  `json:"base_candidates,omitempty"`
-	Pins        []pins.Pin           `json:"pins,omitempty"`
+	Candidates  []baserec.Candidate   `json:"base_candidates,omitempty"`
+	Pins        []pins.Pin            `json:"pins,omitempty"`
 }
 
 func renderJSON(w io.Writer, req Request) error {
@@ -166,13 +166,13 @@ func renderJSON(w io.Writer, req Request) error {
 
 // SARIF 2.1.0 minimal schema (FR-23).
 type sarif struct {
-	Schema  string      `json:"$schema"`
-	Version string      `json:"version"`
-	Runs    []sarifRun  `json:"runs"`
+	Schema  string     `json:"$schema"`
+	Version string     `json:"version"`
+	Runs    []sarifRun `json:"runs"`
 }
 
 type sarifRun struct {
-	Tool    sarifTool    `json:"tool"`
+	Tool    sarifTool     `json:"tool"`
 	Results []sarifResult `json:"results"`
 }
 
@@ -181,9 +181,9 @@ type sarifTool struct {
 }
 
 type sarifDriver struct {
-	Name            string      `json:"name"`
-	InformationURI  string      `json:"informationUri"`
-	Rules           []sarifRule `json:"rules"`
+	Name           string      `json:"name"`
+	InformationURI string      `json:"informationUri"`
+	Rules          []sarifRule `json:"rules"`
 }
 
 type sarifRule struct {
@@ -194,9 +194,9 @@ type sarifRule struct {
 }
 
 type sarifResult struct {
-	RuleID    string         `json:"ruleId"`
-	Level     string         `json:"level"`
-	Message   sarifMessage   `json:"message"`
+	RuleID    string          `json:"ruleId"`
+	Level     string          `json:"level"`
+	Message   sarifMessage    `json:"message"`
 	Locations []sarifLocation `json:"locations,omitempty"`
 }
 

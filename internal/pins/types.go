@@ -4,13 +4,13 @@ package pins
 type Status string
 
 const (
-	StatusCurrent         Status = "current"           // pinned == latest available
-	StatusUpdateAvailable Status = "update-available"  // newer version exists
-	StatusFixesCVEs       Status = "fixes-CVE(s)"      // newer version resolves attributed CVEs
-	StatusUnavailable     Status = "unavailable"       // pinned version absent from repo
-	StatusUnknown         Status = "unknown"            // lookup timed out or output unparseable
-	StatusVariable        Status = "variable"           // version is ARG-only, no default
-	StatusUnsupported     Status = "unsupported"        // package from a third-party repo
+	StatusCurrent         Status = "current"          // pinned == latest available
+	StatusUpdateAvailable Status = "update-available" // newer version exists
+	StatusFixesCVEs       Status = "fixes-CVE(s)"     // newer version resolves attributed CVEs
+	StatusUnavailable     Status = "unavailable"      // pinned version absent from repo
+	StatusUnknown         Status = "unknown"          // lookup timed out or output unparseable
+	StatusVariable        Status = "variable"         // version is ARG-only, no default
+	StatusUnsupported     Status = "unsupported"      // package from a third-party repo
 )
 
 // Pin is one exact-pinned OS package extracted from a Dockerfile RUN instruction.
