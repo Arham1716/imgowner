@@ -116,7 +116,7 @@ func Classify(
 	return findings
 }
 
-func isOSPkgs(class string) bool  { return strings.EqualFold(class, "os-pkgs") }
+func isOSPkgs(class string) bool   { return strings.EqualFold(class, "os-pkgs") }
 func isLangPkgs(class string) bool { return strings.EqualFold(class, "lang-pkgs") }
 
 func baseReason(base *image.BaseResolution) string {

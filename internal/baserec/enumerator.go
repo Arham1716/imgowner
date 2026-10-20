@@ -18,7 +18,7 @@ type Candidate struct {
 	Digest        string
 	CVEsRemoved   int
 	CVEsRemaining int
-	Failed        bool   // true if the scan for this candidate failed
+	Failed        bool // true if the scan for this candidate failed
 	FailReason    string
 }
 

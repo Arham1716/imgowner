@@ -11,10 +11,10 @@ import (
 
 // Result is the top-level Trivy JSON output for an image scan.
 type Result struct {
-	SchemaVersion int             `json:"SchemaVersion"`
-	ArtifactName  string          `json:"ArtifactName"`
-	Metadata      Metadata        `json:"Metadata"`
-	Results       []TargetResult  `json:"Results"`
+	SchemaVersion int            `json:"SchemaVersion"`
+	ArtifactName  string         `json:"ArtifactName"`
+	Metadata      Metadata       `json:"Metadata"`
+	Results       []TargetResult `json:"Results"`
 }
 
 type Metadata struct {
@@ -55,8 +55,8 @@ type Vulnerability struct {
 
 // Layer identifies which image layer a vulnerability came from.
 type Layer struct {
-	DiffID  string `json:"DiffID"`
-	Digest  string `json:"Digest,omitempty"`
+	DiffID string `json:"DiffID"`
+	Digest string `json:"Digest,omitempty"`
 }
 
 // Runner executes Trivy scans and manages the digest cache.

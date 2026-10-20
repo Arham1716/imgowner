@@ -4,13 +4,13 @@ import "testing"
 
 func TestFilterCandidates(t *testing.T) {
 	allTags := []string{
-		"3.12-slim",        // current — excluded
-		"3.12.0-slim",      // equal to 3.12 (same semver) — excluded
-		"3.12.1-slim",      // patch bump — candidate
-		"3.13-slim",        // minor bump, same suffix — candidate
-		"3.12-bookworm",    // different suffix — excluded
-		"3.11-slim",        // older minor — excluded
-		"latest",           // no suffix match — excluded
+		"3.12-slim",     // current — excluded
+		"3.12.0-slim",   // equal to 3.12 (same semver) — excluded
+		"3.12.1-slim",   // patch bump — candidate
+		"3.13-slim",     // minor bump, same suffix — candidate
+		"3.12-bookworm", // different suffix — excluded
+		"3.11-slim",     // older minor — excluded
+		"latest",        // no suffix match — excluded
 	}
 
 	got := filterCandidates("3.12-slim", allTags)
