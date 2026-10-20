@@ -1,0 +1,60 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "imgowner: attribute",
+      "type": "shell",
+      "command": "imgowner",
+      "args": [
+        "attribute",
+        "--image", "${input:imageRef}",
+        "--dockerfile", "${input:dockerfilePath}",
+        "--format", "md,json,sarif",
+        "--output-dir", "imgowner-report"
+      ],
+      "group": "test",
+      "presentation": { "reveal": "always", "panel": "dedicated" },
+      "problemMatcher": []
+    },
+    {
+      "label": "imgowner: pins check",
+      "type": "shell",
+      "command": "imgowner",
+      "args": [
+        "pins", "check",
+        "--dockerfile", "${input:dockerfilePath}"
+      ],
+      "group": "test",
+      "presentation": { "reveal": "always", "panel": "dedicated" },
+      "problemMatcher": []
+    },
+    {
+      "label": "imgowner: ci (full pipeline)",
+      "type": "shell",
+      "command": "imgowner",
+      "args": [
+        "ci",
+        "--image", "${input:imageRef}",
+        "--dockerfile", "${input:dockerfilePath}",
+        "--format", "md,json,sarif",
+        "--output-dir", "imgowner-report"
+      ],
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "dedicated" },
+      "problemMatcher": []
+    }
+  ],
+  "inputs": [
+    {
+      "id": "imageRef",
+      "description": "Image reference to scan (e.g. python:3.12-slim)",
+      "type": "promptString"
+    },
+    {
+      "id": "dockerfilePath",
+      "description": "Path to Dockerfile",
+      "default": "Dockerfile",
+      "type": "promptString"
+    }
+  ]
+}
