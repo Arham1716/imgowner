@@ -34,9 +34,9 @@ inputs:
     required: false
     default: 'false'
   trivy-version:
-    description: Trivy version to install (must be >= 0.76.0)
+    description: Trivy version to install (must satisfy scan.trivy_min_version)
     required: false
-    default: 0.59.1
+    default: 0.76.0
 
 outputs:
   report-dir:
