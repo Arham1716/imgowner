@@ -82,7 +82,9 @@ func parseSemver(v string) [3]int {
 		if i >= 3 {
 			break
 		}
-		fmt.Sscanf(p, "%d", &out[i])
+		// A non-numeric segment is intentionally left as 0; versionAtLeast
+		// still compares the remaining numeric segments correctly.
+		_, _ = fmt.Sscanf(p, "%d", &out[i])
 	}
 	return out
 }

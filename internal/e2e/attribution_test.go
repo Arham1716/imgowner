@@ -140,6 +140,23 @@ func TestAttribute_DigestPinRestoresConfidence(t *testing.T) {
 	}
 }
 
+// Multi-stage Dockerfiles with a named final stage ("AS final") must resolve
+// the same base as an unnamed one. The low-level Dockerfile tokenizer splits
+// "FROM x AS name" across multiple AST nodes, and an earlier version of the
+// parser only read the first node, silently losing "AS name" for every
+// multi-stage build — the most common Dockerfile pattern there is.
+func TestAttribute_NamedMultiStageResolvesBase(t *testing.T) {
+	df := writeDockerfile(t, "FROM "+baseImage+" AS final\n")
+	res := runAttribute(t, baseImage, df, "")
+
+	if !res.Base.Confident {
+		t.Fatalf("named final stage should resolve the base just like an unnamed one, got: %s", res.Base.Reason)
+	}
+	if res.BaseRef != baseImage {
+		t.Errorf("BaseRef should be %q regardless of the AS clause, got %q", baseImage, res.BaseRef)
+	}
+}
+
 // Every finding must carry a severity and a package name; downstream reports
 // and the policy gate both depend on these being populated.
 func TestAttribute_FindingsAreWellFormed(t *testing.T) {

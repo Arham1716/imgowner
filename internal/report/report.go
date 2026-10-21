@@ -75,67 +75,92 @@ func writeFormat(req Request, ext string, render func(io.Writer, Request) error)
 	if err != nil {
 		return fmt.Errorf("report: create %s: %w", path, err)
 	}
-	defer f.Close()
-	return render(f, req)
+	if err := render(f, req); err != nil {
+		_ = f.Close()
+		return err
+	}
+	// Close explicitly, not deferred: a failure flushing to disk (e.g. the
+	// volume filled up mid-write) must be reported, not silently swallowed.
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("report: closing %s: %w", path, err)
+	}
+	return nil
 }
 
 // ── Markdown ──────────────────────────────────────────────────────────────────
 
+// errWriter accumulates the first write error so a long sequence of Fprintf
+// calls does not need an error check after each one; every write becomes a
+// no-op once err is set, and the caller checks err exactly once at the end.
+type errWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (ew *errWriter) printf(format string, args ...any) {
+	if ew.err != nil {
+		return
+	}
+	_, ew.err = fmt.Fprintf(ew.w, format, args...)
+}
+
 func renderMarkdown(w io.Writer, req Request) error {
 	counts := findingCounts(req.Findings)
-	fmt.Fprintf(w, "# imgowner report\n\n")
-	fmt.Fprintf(w, "**Image:** `%s`  \n**Base:** `%s`  \n**Generated:** %s\n\n",
+	ew := &errWriter{w: w}
+
+	ew.printf("# imgowner report\n\n")
+	ew.printf("**Image:** `%s`  \n**Base:** `%s`  \n**Generated:** %s\n\n",
 		req.Image, req.BaseRef, time.Now().UTC().Format(time.RFC3339))
 
-	fmt.Fprintf(w, "## CVE attribution\n\n")
-	fmt.Fprintf(w, "| Owner | Count |\n|---|---|\n")
-	fmt.Fprintf(w, "| base | %d |\n", counts[attribution.OwnerBase])
-	fmt.Fprintf(w, "| added-os | %d |\n", counts[attribution.OwnerAddedOS])
-	fmt.Fprintf(w, "| app | %d |\n", counts[attribution.OwnerApp])
-	fmt.Fprintf(w, "| unattributed | %d |\n\n", counts[attribution.OwnerUnattributed])
+	ew.printf("## CVE attribution\n\n")
+	ew.printf("| Owner | Count |\n|---|---|\n")
+	ew.printf("| base | %d |\n", counts[attribution.OwnerBase])
+	ew.printf("| added-os | %d |\n", counts[attribution.OwnerAddedOS])
+	ew.printf("| app | %d |\n", counts[attribution.OwnerApp])
+	ew.printf("| unattributed | %d |\n\n", counts[attribution.OwnerUnattributed])
 
 	if len(req.Findings) > 0 {
-		fmt.Fprintf(w, "### Findings\n\n")
-		fmt.Fprintf(w, "| CVE | Severity | Package | Version | Owner | Instruction |\n|---|---|---|---|---|---|\n")
+		ew.printf("### Findings\n\n")
+		ew.printf("| CVE | Severity | Package | Version | Owner | Instruction |\n|---|---|---|---|---|---|\n")
 		for _, f := range req.Findings {
 			instr := ""
 			if f.Instruction != nil {
 				instr = f.Instruction.Text
 			}
-			fmt.Fprintf(w, "| %s | %s | %s | %s | %s | %s |\n",
+			ew.printf("| %s | %s | %s | %s | %s | %s |\n",
 				f.CVE, f.Severity, f.Package, f.InstalledVersion, f.Owner, instr)
 		}
-		fmt.Fprintf(w, "\n")
+		ew.printf("\n")
 	}
 
 	if len(req.Candidates) > 0 {
-		fmt.Fprintf(w, "## Base image recommendations\n\n")
-		fmt.Fprintf(w, "| Tag | CVEs removed | CVEs remaining |\n|---|---|---|\n")
+		ew.printf("## Base image recommendations\n\n")
+		ew.printf("| Tag | CVEs removed | CVEs remaining |\n|---|---|---|\n")
 		for _, c := range req.Candidates {
 			if c.Failed {
-				fmt.Fprintf(w, "| %s | — | — | *(scan failed: %s)* |\n", c.Tag, c.FailReason)
+				ew.printf("| %s | — | — | *(scan failed: %s)* |\n", c.Tag, c.FailReason)
 			} else {
-				fmt.Fprintf(w, "| %s | %d | %d |\n", c.Tag, c.CVEsRemoved, c.CVEsRemaining)
+				ew.printf("| %s | %d | %d |\n", c.Tag, c.CVEsRemoved, c.CVEsRemaining)
 			}
 		}
-		fmt.Fprintf(w, "\n")
+		ew.printf("\n")
 	}
 
 	if len(req.Pins) > 0 {
-		fmt.Fprintf(w, "## Pinned OS packages\n\n")
-		fmt.Fprintf(w, "| Package | Pinned | Available | Status | Line |\n|---|---|---|---|---|\n")
+		ew.printf("## Pinned OS packages\n\n")
+		ew.printf("| Package | Pinned | Available | Status | Line |\n|---|---|---|---|---|\n")
 		for _, p := range req.Pins {
 			avail := p.Available
 			if avail == "" {
 				avail = "—"
 			}
-			fmt.Fprintf(w, "| %s | %s | %s | %s | %d |\n",
+			ew.printf("| %s | %s | %s | %s | %d |\n",
 				p.Package, p.Version, avail, p.Status, p.Line)
 		}
-		fmt.Fprintf(w, "\n")
+		ew.printf("\n")
 	}
 
-	return nil
+	return ew.err
 }
 
 // ── JSON ──────────────────────────────────────────────────────────────────────

@@ -59,10 +59,7 @@ func ParseBytes(data []byte) (*File, error) {
 
 	for _, child := range result.AST.Children {
 		cmd := strings.ToUpper(child.Value)
-		args := ""
-		if child.Next != nil {
-			args = child.Next.Value
-		}
+		args := joinArgs(child.Next)
 		instr := Instruction{
 			Line:    child.StartLine,
 			Command: cmd,
@@ -115,6 +112,19 @@ func (f *File) ResolveBaseRef(stage *Stage) string {
 		ref = strings.ReplaceAll(ref, "$"+k, v)
 	}
 	return ref
+}
+
+// joinArgs reconstructs an instruction's argument string from the parser's
+// node chain. Simple instructions such as FROM tokenise each word into its own
+// chained node ("golang:1.23" -> "AS" -> "builder"), while shell-form
+// instructions such as RUN keep their entire remainder in a single node; both
+// cases are handled correctly by joining whatever nodes are present.
+func joinArgs(n *parser.Node) string {
+	var words []string
+	for ; n != nil; n = n.Next {
+		words = append(words, n.Value)
+	}
+	return strings.Join(words, " ")
 }
 
 // parseARG splits "KEY=VALUE" or "KEY" into key and optional value.
