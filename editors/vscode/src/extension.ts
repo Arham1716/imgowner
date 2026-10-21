@@ -88,11 +88,12 @@ async function attribute(doc: vscode.TextDocument): Promise<void> {
   }
 
   await exclusive(doc, "attribute", "Attributing CVEs (this scans the image and can take a few minutes)…", async () => {
-    const report = await runJSON<JSONReport>(
+    const { data: report, warnings } = await runJSON<JSONReport>(
       ["attribute", "--image", image, "--dockerfile", doc.uri.fsPath, "--format", "json", "--config", resolveConfig(doc)],
       cwdFor(doc),
       output,
     );
+    reportWarnings(warnings, false);
     // Go marshals an empty nil slice as JSON null, so a clean image yields
     // "findings": null rather than [].
     const findings = report.findings ?? [];
@@ -107,7 +108,7 @@ async function attribute(doc: vscode.TextDocument): Promise<void> {
     const unattributed = findings.filter((f) => f.owner === "unattributed").length;
     let msg = `imgowner: ${findings.length} CVE(s) — ${yours} yours, ${findings.length - yours - unattributed} base`;
     if (unattributed > 0) {
-      msg += `, ${unattributed} unattributed (see Output for why)`;
+      msg += `, ${unattributed} unattributed`;
     }
     void vscode.window.showInformationMessage(msg);
   });
@@ -119,13 +120,14 @@ async function checkPins(doc: vscode.TextDocument, opts: { quiet?: boolean } = {
     "pins",
     "Checking pinned package versions…",
     async () => {
-      const pins =
-        (await runJSON<Pin[] | null>(
-          ["pins", "check", "--dockerfile", doc.uri.fsPath, "--format", "json", "--config", resolveConfig(doc)],
-          cwdFor(doc),
-          output,
-        )) ?? [];
+      const { data, warnings } = await runJSON<Pin[] | null>(
+        ["pins", "check", "--dockerfile", doc.uri.fsPath, "--format", "json", "--config", resolveConfig(doc)],
+        cwdFor(doc),
+        output,
+      );
+      const pins = data ?? [];
       state.set(doc.uri, { pins });
+      reportWarnings(warnings, opts.quiet ?? false);
       if (!opts.quiet) {
         const stale = pins.filter((p) => p.status !== "current" && p.status !== "unknown").length;
         void vscode.window.showInformationMessage(`imgowner: ${pins.length} pinned package(s), ${stale} need attention`);
@@ -150,11 +152,12 @@ async function updatePins(doc: vscode.TextDocument): Promise<void> {
   }
 
   await exclusive(doc, "pins", "Updating pinned package versions…", async () => {
-    const stdout = await run(
+    const { stdout, warnings } = await run(
       ["pins", "update", "--dockerfile", doc.uri.fsPath, "--config", resolveConfig(doc)],
       cwdFor(doc),
       output,
     );
+    reportWarnings(warnings, false);
     void vscode.window.showInformationMessage(`imgowner: ${stdout.trim() || "pins updated"}`);
   });
 
@@ -199,6 +202,28 @@ async function revealLine(uri: vscode.Uri, line: number): Promise<void> {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Surfaces CLI warnings from a run that still succeeded but whose results are
+ * degraded -- e.g. every pin "unknown" because Docker isn't running. Without
+ * this the only trace would be in the Output panel, which nobody opens after
+ * a command that appeared to work.
+ */
+function reportWarnings(warnings: string[], quiet: boolean): void {
+  if (warnings.length === 0) {
+    return;
+  }
+  const summary = warnings.length === 1 ? warnings[0] : `${warnings[0]} (+${warnings.length - 1} more)`;
+  if (quiet) {
+    vscode.window.setStatusBarMessage(`$(warning) imgowner: ${summary}`, 8000);
+    return;
+  }
+  void vscode.window.showWarningMessage(`imgowner: ${summary}`, "Show Output").then((choice) => {
+    if (choice === "Show Output") {
+      output.show(true);
+    }
+  });
+}
 
 function refreshDiagnostics(uri: vscode.Uri): void {
   const doc = vscode.workspace.textDocuments.find((d) => d.uri.toString() === uri.toString());

@@ -47,8 +47,8 @@ export async function runJSON<T>(
   args: string[],
   cwd: string,
   output: vscode.OutputChannel,
-): Promise<T> {
-  const stdout = await run(args, cwd, output);
+): Promise<{ data: T; warnings: string[] }> {
+  const { stdout, warnings } = await run(args, cwd, output);
   const parsed = tryParseJSON<T>(stdout);
   if (parsed === undefined) {
     throw new CLIError(
@@ -56,11 +56,22 @@ export async function runJSON<T>(
       0,
     );
   }
-  return parsed;
+  return { data: parsed, warnings };
 }
 
-/** Runs `imgowner <args>` and resolves with raw stdout on exit code 0. */
-export function run(args: string[], cwd: string, output: vscode.OutputChannel): Promise<string> {
+export interface RunResult {
+  stdout: string;
+  /**
+   * Lines imgowner wrote to stderr as "warning: ..." on a successful run --
+   * for example a pin lookup that couldn't reach Docker, or a base image
+   * boundary that couldn't be verified. The command still succeeded, but its
+   * results are degraded and the user needs to know why.
+   */
+  warnings: string[];
+}
+
+/** Runs `imgowner <args>` and resolves on exit code 0. */
+export function run(args: string[], cwd: string, output: vscode.OutputChannel): Promise<RunResult> {
   const bin = getBinaryPath();
   output.appendLine(`$ ${bin} ${args.join(" ")}`);
 
@@ -106,10 +117,27 @@ export function run(args: string[], cwd: string, output: vscode.OutputChannel): 
           return;
         }
 
-        resolve(stdout);
+        resolve({ stdout, warnings: parseWarnings(stderr) });
       },
     );
   });
+}
+
+/**
+ * Collects "warning: ..." entries from stderr. imgowner indents continuation
+ * lines ("  reason: ...") under a warning, so those are folded into the entry
+ * they belong to rather than reported on their own.
+ */
+export function parseWarnings(stderr: string): string[] {
+  const warnings: string[] = [];
+  for (const line of stderr.split(/\r?\n/)) {
+    if (line.startsWith("warning:")) {
+      warnings.push(line.slice("warning:".length).trim());
+    } else if (/^\s+\S/.test(line) && warnings.length > 0) {
+      warnings[warnings.length - 1] += " " + line.trim();
+    }
+  }
+  return warnings;
 }
 
 function tryParseJSON<T>(text: string): T | undefined {
