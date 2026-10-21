@@ -2,6 +2,12 @@ module github.com/Arham1716/imgowner
 
 go 1.23
 
+// v0.1.0 resolved the base image by tag at scan time. For any image whose base
+// tag had moved since the build, the layer check failed, the error was
+// discarded, and every base-image CVE was reported as added-os or app — blaming
+// teams for vulnerabilities they do not control. Fixed in v0.2.0.
+retract v0.1.0
+
 require (
 	github.com/google/go-containerregistry v0.20.2
 	github.com/moby/buildkit v0.17.1
