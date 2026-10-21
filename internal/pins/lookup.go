@@ -84,6 +84,24 @@ func buildLookupScript(mgr string, pins []Pin) (string, error) {
 			)
 		}
 
+	case "rpm":
+		// dnf and yum share this query surface; microdnf images usually ship
+		// neither, so fall back through whichever binary exists.
+		b.WriteString(`PM=$(command -v dnf || command -v yum || command -v microdnf); `)
+		for _, p := range pins {
+			pkg := sanitizeIdentifier(p.Package)
+			pin := sanitizeVersion(p.Version)
+			// "dnf list available" prints "name.arch  version-release  repo";
+			// take the newest version column for this exact package name.
+			fmt.Fprintf(&b,
+				`LATEST=$($PM -q list available %s 2>/dev/null | awk '$1 ~ /^%s\./ {print $2}' | sort -V | tail -1); `+
+					`if [ -z "$LATEST" ]; then echo "UNAVAILABLE:%s"; `+
+					`elif [ "$LATEST" != "%s" ]; then echo "UPDATE:%s:%s:$LATEST"; `+
+					`else echo "CURRENT:%s:%s:$LATEST"; fi; `,
+				pkg, pkg, pkg, pin, pkg, pin, pkg, pin,
+			)
+		}
+
 	default:
 		return "", fmt.Errorf("unsupported package manager %q", mgr)
 	}

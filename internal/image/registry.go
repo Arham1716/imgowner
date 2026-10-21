@@ -2,12 +2,15 @@ package image
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 )
 
 // ImageInfo holds the resolved digest and the full image manifest/config.
@@ -27,7 +30,10 @@ func Resolve(ctx context.Context, imageRef, platform string) (*ImageInfo, error)
 		return nil, fmt.Errorf("imgowner: invalid image reference %q: %w", imageRef, err)
 	}
 
-	opts := remoteOpts(ctx, platform)
+	opts, err := remoteOpts(ctx, platform)
+	if err != nil {
+		return nil, err
+	}
 
 	img, err := remote.Image(ref, opts...)
 	if err != nil {
@@ -62,35 +68,23 @@ func Config(ctx context.Context, imageRef, platform string) (*v1.ConfigFile, err
 }
 
 // remoteOpts builds the option slice for go-containerregistry remote calls.
-func remoteOpts(ctx context.Context, platform string) []remote.Option {
+// An unparseable platform is an error rather than a silent fallback: scanning
+// a different architecture than the caller asked for would report CVEs for
+// binaries that are not in their image.
+func remoteOpts(ctx context.Context, platform string) ([]remote.Option, error) {
 	opts := []remote.Option{
 		remote.WithContext(ctx),
 		remote.WithAuthFromKeychain(authn.DefaultKeychain), // Docker credential chain (DQ-2)
 	}
-	if platform != "" {
-		p, err := parsePlatform(platform)
-		if err == nil {
-			opts = append(opts, remote.WithPlatform(p))
-		}
+	if platform == "" {
+		return opts, nil
 	}
-	return opts
-}
-
-// parsePlatform converts "linux/amd64" to a v1.Platform struct.
-func parsePlatform(s string) (v1.Platform, error) {
-	var p v1.Platform
-	if _, err := fmt.Sscanf(s, "%s", &s); err != nil {
-		return p, err
+	p, err := v1.ParsePlatform(platform)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"imgowner: invalid platform %q (expected os/arch, e.g. linux/amd64): %w", platform, err)
 	}
-	switch s {
-	case "linux/amd64":
-		return v1.Platform{OS: "linux", Architecture: "amd64"}, nil
-	case "linux/arm64":
-		return v1.Platform{OS: "linux", Architecture: "arm64"}, nil
-	default:
-		// Let go-containerregistry handle it via string split.
-		return v1.Platform{OS: "linux", Architecture: "amd64"}, nil
-	}
+	return append(opts, remote.WithPlatform(*p)), nil
 }
 
 // ErrImageNotFound is returned when the registry returns a 404 / manifest unknown.
@@ -112,51 +106,60 @@ func (e *ErrRegistryUnreachable) Error() string {
 	return fmt.Sprintf("imgowner: registry unreachable: %s: %v", e.Host, e.Cause)
 }
 
-// classifyRemoteErr maps go-containerregistry errors to our typed errors.
+// ErrRegistryAuth is returned when the registry rejects the credentials.
+type ErrRegistryAuth struct {
+	Host string
+	Ref  string
+}
+
+func (e *ErrRegistryAuth) Error() string {
+	return fmt.Sprintf(
+		"imgowner: not authorised for %s — run `docker login %s` or set registry credentials",
+		e.Ref, e.Host)
+}
+
+// ErrRateLimited is returned when the registry throttles the request.
+// Docker Hub caps anonymous pulls per IP, which CI runners hit routinely once
+// base image recommendation starts scanning candidate tags.
+type ErrRateLimited struct {
+	Host string
+}
+
+func (e *ErrRateLimited) Error() string {
+	return fmt.Sprintf(
+		"imgowner: %s rate-limited this request — authenticate with `docker login %s` "+
+			"to raise the limit, or lower scan.base_candidates", e.Host, e.Host)
+}
+
+// classifyRemoteErr maps registry failures to typed errors. HTTP status codes
+// are read from the transport error where available; string matching is only a
+// fallback for transports that do not surface one.
 func classifyRemoteErr(err error, ref string) error {
-	msg := err.Error()
-	// "MANIFEST_UNKNOWN" or "404" → image not found (F4)
-	for _, marker := range []string{"MANIFEST_UNKNOWN", "404", "not found"} {
-		if containsFold(msg, marker) {
-			return &ErrImageNotFound{Ref: ref}
-		}
-	}
-	// Everything else is a connectivity / auth failure (F3)
 	host := hostFromRef(ref)
+
+	var terr *transport.Error
+	if errors.As(err, &terr) {
+		switch terr.StatusCode {
+		case 404:
+			return &ErrImageNotFound{Ref: ref}
+		case 401, 403:
+			return &ErrRegistryAuth{Host: host, Ref: ref}
+		case 429:
+			return &ErrRateLimited{Host: host}
+		}
+	}
+
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "manifest_unknown"), strings.Contains(msg, "not found"):
+		return &ErrImageNotFound{Ref: ref}
+	case strings.Contains(msg, "toomanyrequests"), strings.Contains(msg, "too many requests"):
+		return &ErrRateLimited{Host: host}
+	case strings.Contains(msg, "unauthorized"), strings.Contains(msg, "denied"):
+		return &ErrRegistryAuth{Host: host, Ref: ref}
+	}
+
 	return &ErrRegistryUnreachable{Host: host, Cause: err}
-}
-
-func containsFold(s, sub string) bool {
-	return len(s) >= len(sub) && (s == sub ||
-		len(s) > 0 && containsFoldSlow(s, sub))
-}
-
-func containsFoldSlow(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if equalFold(s[i:i+len(sub)], sub) {
-			return true
-		}
-	}
-	return false
-}
-
-func equalFold(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		ca, cb := a[i], b[i]
-		if ca >= 'A' && ca <= 'Z' {
-			ca += 'a' - 'A'
-		}
-		if cb >= 'A' && cb <= 'Z' {
-			cb += 'a' - 'A'
-		}
-		if ca != cb {
-			return false
-		}
-	}
-	return true
 }
 
 func hostFromRef(ref string) string {

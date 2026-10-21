@@ -152,9 +152,11 @@ the base.
 ## Limitations
 
 - Attribution needs per-layer `DiffID`s from Trivy. Squashed images do not carry
-  them, and findings without one are reported as `unattributed`.
-- `apt` and `apk` only. RPM-based images are scanned and attributed normally,
-  but their pins are not managed.
+  them; `imgowner` detects this case and says so rather than reporting every
+  finding as unattributed with no explanation.
+- Pin management covers `apt`, `apk` and the RPM family (`dnf`, `yum`,
+  `microdnf`). Other package managers are scanned and attributed normally, but
+  their pins are not tracked.
 - Pin lookup assumes one package manager per stage.
 - `linux/amd64` is the default platform; others work via `scan.platform` but are
   less well tested.
