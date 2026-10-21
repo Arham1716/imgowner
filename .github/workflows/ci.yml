@@ -80,6 +80,37 @@ jobs:
       - name: Run e2e tests
         run: go test -tags e2e -timeout 20m ./internal/e2e/...
 
+  vscode-extension:
+    name: VS Code extension
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      # Dev-only dependencies, but the extension ships from a security tool's
+      # repo; a HIGH advisory in its own toolchain should not go unnoticed.
+      - name: Audit
+        run: npm audit --audit-level=high
+
+      # @types/vscode is pinned to the engines.vscode floor, so this fails if
+      # the code uses any API newer than the oldest VS Code it claims to support.
+      - name: Compile
+        run: npx tsc -p ./
+
+      - name: Package
+        run: npx vsce package --no-dependencies
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

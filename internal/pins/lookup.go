@@ -3,7 +3,9 @@ package pins
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 	"time"
 )
@@ -33,14 +35,44 @@ func LookupVersions(ctx context.Context, rt Runtime, imageRef string, pins []Pin
 	cmd := rt.Run(ctx, "run", "--rm", "--entrypoint", "sh", imageRef, "-c", script)
 	out, err := cmd.Output()
 	if err != nil {
-		// Mark all as unknown — non-fatal (design F16 DEFER path).
+		// Non-fatal (design F16 DEFER path): every pin becomes unknown, but the
+		// caller gets the reason so it can be reported instead of leaving the
+		// user with a column of "unknown" and no explanation.
 		for i := range pins {
 			pins[i].Status = StatusUnknown
 		}
-		return pins, nil
+		return pins, &LookupFailedError{Image: imageRef, Runtime: string(rt), Detail: runFailureDetail(err)}
 	}
 
 	return parseLookupOutput(out, pins), nil
+}
+
+// LookupFailedError reports that the container version lookup for one stage
+// could not run. The pins it covers are still returned, marked unknown, so
+// callers should treat this as a warning rather than abort.
+type LookupFailedError struct {
+	Image   string
+	Runtime string
+	Detail  string
+}
+
+func (e *LookupFailedError) Error() string {
+	return fmt.Sprintf("pin version lookup in %s via %s failed: %s", e.Image, e.Runtime, e.Detail)
+}
+
+// runFailureDetail extracts the runtime's own stderr, which carries the useful
+// part ("failed to connect to the docker API ..." when the daemon is down);
+// the Go error alone is just "exit status 1".
+func runFailureDetail(err error) string {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && len(bytes.TrimSpace(ee.Stderr)) > 0 {
+		msg := strings.TrimSpace(string(ee.Stderr))
+		if len(msg) > 500 {
+			msg = msg[:500] + "… (truncated)"
+		}
+		return msg
+	}
+	return err.Error()
 }
 
 // buildLookupScript produces a shell script that outputs one line per package:
