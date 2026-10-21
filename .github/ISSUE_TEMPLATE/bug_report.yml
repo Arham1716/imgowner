@@ -1,0 +1,43 @@
+name: Bug report
+description: Something isn't working correctly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For a security vulnerability (especially a wrong CVE attribution),
+        use [private reporting](https://github.com/Arham1716/imgowner/security)
+        instead of this form.
+
+  - type: input
+    id: version
+    attributes:
+      label: imgowner version
+      description: Output of `imgowner --version`, or the release/commit you built from
+      placeholder: v0.2.0
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command and output
+      description: The exact command you ran and its full output (stdout + stderr)
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: >
+        Dockerfile content (redact anything sensitive), image reference, OS,
+        Trivy version — whatever's relevant.

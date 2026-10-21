@@ -1,5 +1,11 @@
 # imgowner
 
+[![CI](https://github.com/Arham1716/imgowner/actions/workflows/ci.yml/badge.svg)](https://github.com/Arham1716/imgowner/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/Arham1716/imgowner.svg)](https://pkg.go.dev/github.com/Arham1716/imgowner)
+[![Go Report Card](https://goreportcard.com/badge/github.com/Arham1716/imgowner)](https://goreportcard.com/report/github.com/Arham1716/imgowner)
+[![Latest release](https://img.shields.io/github/v/release/Arham1716/imgowner)](https://github.com/Arham1716/imgowner/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Container CVE attribution and OS package pin updater.
 
 A vulnerability scanner tells you a container has 241 CVEs. It does not tell you
@@ -171,6 +177,16 @@ golangci-lint run                  # same config CI runs
 
 The `e2e` suite scans real public images and asserts structural properties of
 the attribution, so it is excluded from the default test run.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and PR
+checklist. Participation is governed by the
+[Code of Conduct](CODE_OF_CONDUCT.md).
+
+Found a security issue, especially a wrong CVE attribution? See
+[SECURITY.md](SECURITY.md) — please report it privately rather than as a
+public issue.
 
 ## License
 
