@@ -1,6 +1,6 @@
 module github.com/Arham1716/imgowner
 
-go 1.23
+go 1.26.0
 
 // v0.1.0 resolved the base image by tag at scan time. For any image whose base
 // tag had moved since the build, the layer check failed, the error was
@@ -12,7 +12,7 @@ require (
 	github.com/google/go-containerregistry v0.20.2
 	github.com/moby/buildkit v0.17.1
 	github.com/spf13/cobra v1.8.1
-	golang.org/x/sync v0.8.0
+	golang.org/x/sync v0.24.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
