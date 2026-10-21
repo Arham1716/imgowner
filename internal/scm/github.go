@@ -151,7 +151,7 @@ func (g *gitHubClient) do(req *http.Request) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("http: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("github API %s %s → %d: %s", req.Method, req.URL, resp.StatusCode, body)

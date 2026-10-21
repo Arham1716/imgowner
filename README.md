@@ -166,6 +166,7 @@ the base.
 ```bash
 go test ./...                      # unit tests
 go test -tags e2e ./internal/e2e/  # needs trivy + network
+golangci-lint run                  # same config CI runs
 ```
 
 The `e2e` suite scans real public images and asserts structural properties of

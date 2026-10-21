@@ -101,7 +101,9 @@ func parseSemver(v string) [3]int {
 		if i >= 3 {
 			break
 		}
-		fmt.Sscanf(s, "%d", &parts[i])
+		// A non-numeric segment is intentionally left as 0, not an error:
+		// this already happens for non-semver tags like "latest" or "bookworm".
+		_, _ = fmt.Sscanf(s, "%d", &parts[i])
 	}
 	return parts
 }

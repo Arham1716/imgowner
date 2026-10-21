@@ -2,7 +2,9 @@ package config
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -122,6 +124,11 @@ func Load(path string) (Config, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true) // unknown keys → structured error (FR-29)
 	if err := dec.Decode(&cfg); err != nil {
+		if errors.Is(err, io.EOF) {
+			// An empty (or all-comments) file carries no overrides; that is
+			// not a configuration error.
+			return cfg, nil
+		}
 		return Config{}, fmt.Errorf("imgowner: config error in %s: %w", path, err)
 	}
 
