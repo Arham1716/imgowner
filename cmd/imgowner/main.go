@@ -320,7 +320,12 @@ func runPinLookup(
 			stgPins[j] = pinList[idx]
 		}
 		updated, err := pins.LookupVersions(ctx, rt, g.ref, stgPins)
-		if err != nil {
+		var lookupErr *pins.LookupFailedError
+		if errors.As(err, &lookupErr) {
+			// Warn on stderr, keep going: stdout must stay clean JSON for
+			// --format json, and other stages may still look up fine.
+			fmt.Fprintf(os.Stderr, "warning: %v\n", lookupErr)
+		} else if err != nil {
 			return pinList, err
 		}
 		for j, idx := range g.idxs {
