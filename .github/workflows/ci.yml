@@ -81,7 +81,11 @@ jobs:
           go-version: '1.23'
           cache: true
 
-      - uses: golangci/golangci-lint-action@v6
+      # .golangci.yml uses the v2 config schema; golangci-lint-action@v6 only
+      # knows how to install and run v1.x binaries, which fail to parse it
+      # (confirmed: the step failed in ~13s on every open PR, too fast to
+      # have actually linted anything). v9 supports v2 binaries directly.
+      - uses: golangci/golangci-lint-action@v9
         with:
-          version: v1.62
+          version: v2.1.6
           args: --timeout=5m
