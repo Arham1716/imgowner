@@ -9,6 +9,16 @@ on:
 permissions:
   contents: read
 
+# GOTOOLCHAIN defaults to "auto", which silently downloads a newer Go
+# toolchain when go.mod's "go" directive requires one. That let a dependency
+# bump requiring Go 1.26 pass "go build" here while the project is deliberately
+# pinned to Go 1.23 for toolchain compatibility (see go.mod) -- the mismatch
+# only surfaced because the Lint job's golangci-lint binary couldn't do the
+# same silent upgrade. Pinning GOTOOLCHAIN=local makes an incompatible bump
+# fail the build directly, instead of only being caught as a side effect.
+env:
+  GOTOOLCHAIN: local
+
 jobs:
   test:
     name: Build and test
