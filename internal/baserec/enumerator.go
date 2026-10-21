@@ -13,13 +13,13 @@ import (
 
 // Candidate is one base image tag that may remove CVEs relative to the current base.
 type Candidate struct {
-	Ref           string // digest-pinned FROM argument, e.g. python:3.12.1-slim@sha256:...
-	Tag           string // short tag, e.g. 3.12.1-slim
-	Digest        string
-	CVEsRemoved   int
-	CVEsRemaining int
-	Failed        bool // true if the scan for this candidate failed
-	FailReason    string
+	Ref           string `json:"ref"` // digest-pinned FROM argument, e.g. python:3.12.1-slim@sha256:...
+	Tag           string `json:"tag"` // short tag, e.g. 3.12.1-slim
+	Digest        string `json:"digest,omitempty"`
+	CVEsRemoved   int    `json:"cves_removed"`
+	CVEsRemaining int    `json:"cves_remaining"`
+	Failed        bool   `json:"failed"` // true if the scan for this candidate failed
+	FailReason    string `json:"fail_reason,omitempty"`
 }
 
 // Enumerate lists up to maxN patch-tag candidates for baseRef from the registry.

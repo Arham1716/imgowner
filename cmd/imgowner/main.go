@@ -206,6 +206,7 @@ func pinsCheckCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 	var (
 		dockerfilePath string
 		imageRef       string
+		format         string
 	)
 
 	cmd := &cobra.Command{
@@ -238,7 +239,11 @@ func pinsCheckCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 				return writeStructuredError(map[string]string{"error": err.Error()})
 			}
 			if len(pinList) == 0 {
-				fmt.Println("No pinned OS packages found.")
+				if strings.EqualFold(format, "json") {
+					fmt.Println("[]")
+				} else {
+					fmt.Println("No pinned OS packages found.")
+				}
 				return nil
 			}
 
@@ -257,12 +262,18 @@ func pinsCheckCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 				return writeStructuredError(map[string]string{"error": err.Error()})
 			}
 
+			if strings.EqualFold(format, "json") {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(pinList)
+			}
 			printPinsSummary(pinList)
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&dockerfilePath, "dockerfile", "Dockerfile", "path to Dockerfile")
 	cmd.Flags().StringVar(&imageRef, "image", "", "override the base image ref for container lookup")
+	cmd.Flags().StringVar(&format, "format", "text", "output format: text or json")
 	return cmd
 }
 
