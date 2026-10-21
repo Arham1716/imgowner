@@ -5,7 +5,7 @@ import "testing"
 func TestApplyEdits_Single(t *testing.T) {
 	content := []byte("RUN apt-get install -y curl=7.88.1-10\n")
 	// "7.88.1-10" starts at index 29 (after "curl=")
-	offset := findVersionOffset(content, buildLineOffsets(content), 1, "curl", "7.88.1-10")
+	offset := findVersionOffset(content, buildLineOffsets(content), 1, "curl", "7.88.1-10", "apt")
 
 	edits := []Edit{{ByteOffset: offset, OldVersion: "7.88.1-10", NewVersion: "7.88.1-12"}}
 	got, err := ApplyEdits(content, edits)
@@ -22,8 +22,8 @@ func TestApplyEdits_Multiple(t *testing.T) {
 	content := []byte("RUN apt-get install -y curl=7.88.1-10 openssl=3.0.11-1\n")
 	lineOff := buildLineOffsets(content)
 
-	offCurl := findVersionOffset(content, lineOff, 1, "curl", "7.88.1-10")
-	offSSL := findVersionOffset(content, lineOff, 1, "openssl", "3.0.11-1")
+	offCurl := findVersionOffset(content, lineOff, 1, "curl", "7.88.1-10", "apt")
+	offSSL := findVersionOffset(content, lineOff, 1, "openssl", "3.0.11-1", "apt")
 
 	edits := []Edit{
 		{ByteOffset: offCurl, OldVersion: "7.88.1-10", NewVersion: "7.88.1-12"},

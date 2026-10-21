@@ -166,7 +166,7 @@ func attributeCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 			if err != nil {
 				return writeStructuredError(structuredScanErr(err))
 			}
-			warnIfBaseUnresolved(res.Base)
+			warnAboutAttribution(res)
 
 			// Write reports (FR-21, FR-22, FR-23).
 			if err := report.Write(report.Request{
@@ -513,7 +513,7 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 			if err != nil {
 				return writeStructuredError(structuredScanErr(err))
 			}
-			warnIfBaseUnresolved(res.Base)
+			warnAboutAttribution(res)
 			if !res.Base.Confident && failOnBaseMismatch {
 				return writeStructuredError(map[string]string{
 					"error":  "base image boundary could not be verified",
@@ -595,15 +595,25 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 	return cmd
 }
 
-// warnIfBaseUnresolved prints an actionable warning when attribution had to fall
-// back to unattributed because the base image boundary could not be verified.
-func warnIfBaseUnresolved(base *image.BaseResolution) {
-	if base == nil || base.Confident {
+// warnAboutAttribution prints a single actionable warning when attribution had
+// to degrade, instead of repeating the same reason on every finding.
+func warnAboutAttribution(res *pipeline.AttributeResult) {
+	if res == nil {
 		return
 	}
-	fmt.Fprintf(os.Stderr,
-		"warning: base image boundary could not be verified — all findings will be reported as "+
-			"unattributed.\n  reason: %s\n", base.Reason)
+	if res.Squashed {
+		fmt.Fprintf(os.Stderr,
+			"warning: this image carries no per-layer provenance, so no finding can be traced to a "+
+				"Dockerfile instruction.\n"+
+				"  the image appears to have been squashed or flattened; rebuild without squashing "+
+				"to enable attribution.\n")
+		return
+	}
+	if res.Base != nil && !res.Base.Confident {
+		fmt.Fprintf(os.Stderr,
+			"warning: base image boundary could not be verified — all findings will be reported as "+
+				"unattributed.\n  reason: %s\n", res.Base.Reason)
+	}
 }
 
 // evaluatePolicy checks findings against fail_on severities and enforce_owners
@@ -684,6 +694,19 @@ func structuredScanErr(err error) map[string]string {
 		}
 	case *image.ErrImageNotFound:
 		return map[string]string{"error": "image not found", "ref": e.Ref}
+	case *image.ErrRegistryAuth:
+		return map[string]string{
+			"error": "registry authentication failed",
+			"host":  e.Host,
+			"ref":   e.Ref,
+			"hint":  "run `docker login " + e.Host + "` or configure registry credentials",
+		}
+	case *image.ErrRateLimited:
+		return map[string]string{
+			"error": "registry rate limit exceeded",
+			"host":  e.Host,
+			"hint":  "authenticate with `docker login " + e.Host + "` or lower scan.base_candidates",
+		}
 	case *image.ErrRegistryUnreachable:
 		return map[string]string{
 			"error": "registry unreachable",

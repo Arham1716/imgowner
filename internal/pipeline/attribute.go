@@ -35,6 +35,9 @@ type AttributeResult struct {
 	Candidates []baserec.Candidate
 	Digest     string
 	Scan       *scan.Result
+	// Squashed is true when no finding carried a layer DiffID, which means the
+	// image was flattened and per-layer attribution is impossible for any of them.
+	Squashed bool
 }
 
 // Attribute resolves the image, scans it, maps its layers to the Dockerfile and
@@ -93,6 +96,7 @@ func Attribute(ctx context.Context, req AttributeRequest) (*AttributeResult, err
 		BaseRef:  baseRef,
 		Digest:   info.Digest,
 		Scan:     result,
+		Squashed: isSquashed(result),
 	}
 
 	// Recommendation is advisory; a registry failure here must not lose the findings.
@@ -101,6 +105,26 @@ func Attribute(ctx context.Context, req AttributeRequest) (*AttributeResult, err
 	}
 
 	return out, nil
+}
+
+// isSquashed reports whether the scan produced vulnerabilities but none of them
+// carried a layer DiffID. A flattened image has a single layer and no per-layer
+// provenance, so every finding would otherwise be reported as unattributed with
+// no explanation of the underlying cause.
+func isSquashed(result *scan.Result) bool {
+	if result == nil {
+		return false
+	}
+	total := 0
+	for _, t := range result.Results {
+		for _, v := range t.Vulnerabilities {
+			total++
+			if v.Layer.DiffID != "" {
+				return false
+			}
+		}
+	}
+	return total > 0
 }
 
 // OwnerCounts tallies findings by owner, for summaries and assertions.

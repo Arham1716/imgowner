@@ -150,21 +150,31 @@ func extractFromRun(runArgs string, instrLine int, content []byte, lineOffsets [
 		if !isInstall(mgr, tokens[1]) {
 			continue
 		}
-		// Walk remaining tokens; flags start with '-', pkg=ver pairs contain '='.
+		// Walk remaining tokens; flags start with '-'. apt and apk pin with
+		// "pkg=version"; rpm-family managers use "pkg-version-release".
 		for _, tok := range tokens[2:] {
 			if strings.HasPrefix(tok, "-") {
 				continue
 			}
-			eq := strings.Index(tok, "=")
-			if eq < 0 {
-				continue // unpinned — skip
+
+			var pkg, ver string
+			if mgr == "rpm" {
+				var ok bool
+				if pkg, ver, ok = splitRPMToken(tok); !ok {
+					continue // unpinned — skip
+				}
+			} else {
+				eq := strings.Index(tok, "=")
+				if eq < 0 {
+					continue // unpinned — skip
+				}
+				pkg, ver = tok[:eq], tok[eq+1:]
 			}
-			pkg := tok[:eq]
-			ver := tok[eq+1:]
 			if pkg == "" || ver == "" {
 				continue
 			}
-			offset := findVersionOffset(content, lineOffsets, instrLine, pkg, ver)
+
+			offset := findVersionOffset(content, lineOffsets, instrLine, pkg, ver, mgr)
 			pins = append(pins, Pin{
 				Stage:      stage,
 				Package:    pkg,
@@ -201,24 +211,49 @@ func tokenise(s string) []string {
 	return strings.Fields(s)
 }
 
-// packageManager returns the normalised manager name ("apt" or "apk") and true
-// if the command string is a recognised package manager binary.
+// packageManager returns the normalised manager name and true if the command
+// string is a recognised package manager binary.
 func packageManager(cmd string) (string, bool) {
 	switch cmd {
 	case "apt-get", "apt":
 		return "apt", true
 	case "apk":
 		return "apk", true
+	case "yum", "dnf", "microdnf":
+		return "rpm", true
 	}
 	return "", false
 }
 
 // isInstall returns true when the subcommand is the install verb for the given manager.
 func isInstall(mgr, sub string) bool {
-	if mgr == "apt" {
+	switch mgr {
+	case "apt", "rpm":
 		return sub == "install"
+	case "apk":
+		return sub == "add"
 	}
-	return sub == "add" // apk
+	return false
+}
+
+// splitRPMToken splits an RPM name-version-release token such as
+// "curl-7.76.1-26.el9" into ("curl", "7.76.1-26.el9").
+//
+// RPM separates the name from the version with a dash, and package names may
+// themselves contain dashes ("ca-certificates-2023.2.60"). The convention is
+// that the version begins at the first dash followed by a digit, which is what
+// rpm's own name parsing relies on.
+func splitRPMToken(tok string) (pkg, version string, ok bool) {
+	for i := 0; i < len(tok)-1; i++ {
+		if tok[i] != '-' {
+			continue
+		}
+		if tok[i+1] >= '0' && tok[i+1] <= '9' {
+			pkg, version = tok[:i], tok[i+1:]
+			return pkg, version, pkg != "" && version != ""
+		}
+	}
+	return "", "", false
 }
 
 // buildLineOffsets returns a slice where lineOffsets[i] is the byte offset of
@@ -235,8 +270,13 @@ func buildLineOffsets(content []byte) []int {
 
 // findVersionOffset finds the byte offset of the version string within content,
 // searching from instrLine (1-based) onwards. Returns -1 if not found.
-func findVersionOffset(content []byte, lineOffsets []int, instrLine int, pkg, version string) int {
-	pattern := []byte(pkg + "=" + version)
+// The separator depends on the manager: apt and apk use '=', rpm uses '-'.
+func findVersionOffset(content []byte, lineOffsets []int, instrLine int, pkg, version, mgr string) int {
+	sep := "="
+	if mgr == "rpm" {
+		sep = "-"
+	}
+	pattern := []byte(pkg + sep + version)
 	startByte := 0
 	if instrLine > 0 && instrLine-1 < len(lineOffsets) {
 		startByte = lineOffsets[instrLine-1]
@@ -245,5 +285,5 @@ func findVersionOffset(content []byte, lineOffsets []int, instrLine int, pkg, ve
 	if idx < 0 {
 		return -1
 	}
-	return startByte + idx + len(pkg) + 1 // offset of the version string itself
+	return startByte + idx + len(pkg) + len(sep) // offset of the version string itself
 }

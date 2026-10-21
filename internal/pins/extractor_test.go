@@ -164,6 +164,91 @@ func TestSanitizeIdentifier(t *testing.T) {
 	}
 }
 
+func TestSplitRPMToken(t *testing.T) {
+	cases := []struct {
+		tok, pkg, ver string
+		ok            bool
+	}{
+		{"curl-7.76.1-26.el9", "curl", "7.76.1-26.el9", true},
+		// Package names containing dashes must not be split at the first dash.
+		{"ca-certificates-2023.2.60-r0", "ca-certificates", "2023.2.60-r0", true},
+		{"python3-pip-21.2.3-8.el9", "python3-pip", "21.2.3-8.el9", true},
+		// Unpinned package: no dash followed by a digit.
+		{"curl", "", "", false},
+		{"ca-certificates", "", "", false},
+	}
+	for _, tc := range cases {
+		pkg, ver, ok := splitRPMToken(tc.tok)
+		if ok != tc.ok || pkg != tc.pkg || ver != tc.ver {
+			t.Errorf("splitRPMToken(%q) = (%q,%q,%v), want (%q,%q,%v)",
+				tc.tok, pkg, ver, ok, tc.pkg, tc.ver, tc.ok)
+		}
+	}
+}
+
+func TestExtract_RPM(t *testing.T) {
+	src := `FROM rockylinux:9
+RUN dnf install -y curl-7.76.1-26.el9 ca-certificates-2023.2.60-r0
+`
+	df, err := dockerfile.ParseBytes([]byte(src))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	pins, err := Extract([]byte(src), df)
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+
+	want := map[string]string{
+		"curl":            "7.76.1-26.el9",
+		"ca-certificates": "2023.2.60-r0",
+	}
+	if len(pins) != len(want) {
+		t.Fatalf("expected %d pins, got %d: %+v", len(want), len(pins), pins)
+	}
+	for _, p := range pins {
+		if p.Manager != "rpm" {
+			t.Errorf("%s: expected manager rpm, got %s", p.Package, p.Manager)
+		}
+		if want[p.Package] != p.Version {
+			t.Errorf("%s: expected version %q, got %q", p.Package, want[p.Package], p.Version)
+		}
+		// The recorded offset must point at the version text in the source.
+		got := string([]byte(src)[p.ByteOffset : p.ByteOffset+len(p.Version)])
+		if got != p.Version {
+			t.Errorf("%s: ByteOffset %d points at %q, want %q", p.Package, p.ByteOffset, got, p.Version)
+		}
+	}
+}
+
+func TestExtract_RPM_YumAndMicrodnf(t *testing.T) {
+	for _, bin := range []string{"yum", "microdnf"} {
+		src := "FROM rockylinux:9\nRUN " + bin + " install -y curl-7.76.1-26.el9\n"
+		df, err := dockerfile.ParseBytes([]byte(src))
+		if err != nil {
+			t.Fatalf("%s: parse: %v", bin, err)
+		}
+		pins, err := Extract([]byte(src), df)
+		if err != nil || len(pins) != 1 {
+			t.Fatalf("%s: expected 1 pin, got %d (err=%v)", bin, len(pins), err)
+		}
+		if pins[0].Package != "curl" || pins[0].Version != "7.76.1-26.el9" {
+			t.Errorf("%s: got %s=%s", bin, pins[0].Package, pins[0].Version)
+		}
+	}
+}
+
+func TestBuildLookupScript_RPM(t *testing.T) {
+	pins := []Pin{{Package: "curl", Version: "7.76.1-26.el9", Manager: "rpm"}}
+	script, err := buildLookupScript("rpm", pins)
+	if err != nil {
+		t.Fatalf("buildLookupScript: %v", err)
+	}
+	if !strings.Contains(script, "list available") {
+		t.Errorf("expected a dnf/yum availability query; got: %s", script)
+	}
+}
+
 func TestExtract_VariablePin_NoDefault(t *testing.T) {
 	src := `FROM debian:12-slim
 ARG CURL_VER
