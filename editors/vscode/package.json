@@ -1,0 +1,154 @@
+{
+  "name": "imgowner",
+  "displayName": "imgowner",
+  "description": "Container CVE attribution and OS package pin updater, inline in your Dockerfile.",
+  "version": "0.1.0",
+  "publisher": "arham1716",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Arham1716/imgowner.git",
+    "directory": "editors/vscode"
+  },
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Linters",
+    "Other"
+  ],
+  "keywords": [
+    "docker",
+    "dockerfile",
+    "cve",
+    "security",
+    "container",
+    "trivy"
+  ],
+  "activationEvents": [
+    "onLanguage:dockerfile"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "imgowner.attributeCurrentFile",
+        "title": "imgowner: Attribute CVEs for Current Dockerfile",
+        "icon": "$(shield)"
+      },
+      {
+        "command": "imgowner.checkPins",
+        "title": "imgowner: Check Pinned Package Versions",
+        "icon": "$(package)"
+      },
+      {
+        "command": "imgowner.updatePins",
+        "title": "imgowner: Update Pinned Package Versions",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "command": "imgowner.setImageRef",
+        "title": "imgowner: Set Image Reference for This Workspace"
+      },
+      {
+        "command": "imgowner.refresh",
+        "title": "imgowner: Refresh",
+        "icon": "$(refresh)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "imgowner.attributeCurrentFile",
+          "when": "resourceLangId == dockerfile",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "imgowner.attributeCurrentFile"
+        },
+        {
+          "command": "imgowner.checkPins"
+        },
+        {
+          "command": "imgowner.updatePins"
+        },
+        {
+          "command": "imgowner.setImageRef"
+        },
+        {
+          "command": "imgowner.refresh"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "imgowner.refresh",
+          "when": "view == imgownerFindings",
+          "group": "navigation"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "imgowner",
+          "title": "imgowner",
+          "icon": "resources/activity-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "imgowner": [
+        {
+          "id": "imgownerFindings",
+          "name": "Findings",
+          "contextualTitle": "imgowner"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "imgownerFindings",
+        "contents": "No scan has run yet for this workspace.\n[Attribute CVEs](command:imgowner.attributeCurrentFile)\n[Check Pinned Packages](command:imgowner.checkPins)\n\nRequires the `imgowner` CLI and Trivy on PATH, or configured via `imgowner.binaryPath`."
+      }
+    ],
+    "configuration": {
+      "title": "imgowner",
+      "properties": {
+        "imgowner.binaryPath": {
+          "type": "string",
+          "default": "imgowner",
+          "description": "Path to the imgowner binary. Defaults to resolving 'imgowner' from PATH."
+        },
+        "imgowner.image": {
+          "type": "string",
+          "default": "",
+          "description": "Image reference to scan (e.g. myapp:latest). Required for 'Attribute CVEs'; set via the 'imgowner: Set Image Reference' command or here directly.",
+          "scope": "resource"
+        },
+        "imgowner.configPath": {
+          "type": "string",
+          "default": ".imgowner.yaml",
+          "description": "Path to .imgowner.yaml, relative to the workspace root."
+        },
+        "imgowner.autoRunOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Re-run pin checks automatically when a Dockerfile is saved. Does not re-run CVE attribution automatically, since that requires a rebuilt image."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "~1.85.0",
+    "@vscode/vsce": "^4.0.0",
+    "typescript": "^5.6.3"
+  }
+}

@@ -10,3 +10,13 @@ updates:
     directory: /
     schedule:
       interval: weekly
+
+  - package-ecosystem: npm
+    directory: /editors/vscode
+    schedule:
+      interval: weekly
+    ignore:
+      # Pinned to the engines.vscode floor on purpose: newer type definitions
+      # would let code compile against APIs older VS Code versions don't have.
+      # Bump together with engines.vscode, never on its own.
+      - dependency-name: "@types/vscode"
