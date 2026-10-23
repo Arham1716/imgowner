@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/Arham1716/imgowner/internal/safeio"
 )
 
 // Config is the fully resolved configuration for imgowner.
@@ -113,7 +115,7 @@ func (p Pins) LookupDuration() time.Duration {
 func Load(path string) (Config, error) {
 	cfg := Defaults()
 
-	data, err := os.ReadFile(path)
+	data, err := safeio.ReadFile(path, safeio.MaxConfig)
 	if os.IsNotExist(err) {
 		return cfg, nil
 	}

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os/exec"
 	"time"
+
+	"github.com/Arham1716/imgowner/internal/safeio"
 )
 
 // Result is the top-level Trivy JSON output for an image scan.
@@ -94,7 +96,7 @@ func (r *Runner) Scan(ctx context.Context, imageRef, digest string) (*Result, er
 		imageRef,
 	}
 	cmd := exec.CommandContext(ctx, "trivy", args...)
-	raw, err := cmd.Output()
+	raw, err := safeio.Output(cmd, safeio.MaxTrivyReport, "trivy report")
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return nil, fmt.Errorf("imgowner: trivy scan for %s timed out after %s", imageRef, r.Timeout)

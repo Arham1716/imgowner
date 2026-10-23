@@ -103,8 +103,13 @@ func classifyPin(p *Pin, stageArgs map[string]string, thirdParty bool) {
 	if isARGRef(ver) {
 		varName := argVarName(ver)
 		if def, ok := stageArgs[varName]; ok && def != "" {
-			// ARG has a default — resolve and keep as a normal pin.
+			// ARG has a default — resolve it so the version can be looked up.
+			// The resolved text lives on the ARG line, not at the RUN-line
+			// offset found for "${VAR}", so that offset no longer points at
+			// p.Version. Left as is, ApplyEdits rejects the mismatch and the
+			// whole pins update fails; -1 makes PlanEdits skip just this pin.
 			p.Version = def
+			p.ByteOffset = -1
 		} else {
 			// ARG-only with no default — cannot look up.
 			p.Status = StatusVariable

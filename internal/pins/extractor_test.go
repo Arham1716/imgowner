@@ -294,6 +294,35 @@ RUN apt-get install -y curl=${CURL_VER}
 	}
 }
 
+// Found by FuzzExtract: the RUN-line offset of "${CURL_VER}" doesn't point at
+// the resolved version, so an update edit there failed ApplyEdits's mismatch
+// check and aborted the entire pins update. The pin must be skipped instead.
+func TestExtract_VariablePin_WithDefault_IsNotEditable(t *testing.T) {
+	src := `FROM debian:12-slim
+ARG CURL_VER=7.88.1-10
+RUN apt-get install -y curl=${CURL_VER} openssl=3.0.11-1
+`
+	df, err := dockerfile.ParseBytes([]byte(src))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	pins, err := Extract([]byte(src), df)
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	for i := range pins {
+		pins[i].Status = StatusUpdateAvailable
+		pins[i].Available = pins[i].Version + "+1"
+	}
+	edits := PlanEdits(pins)
+	if len(edits) != 1 || edits[0].OldVersion != "3.0.11-1" {
+		t.Fatalf("expected only the literal openssl pin to be edited, got %+v", edits)
+	}
+	if _, err := ApplyEdits([]byte(src), edits); err != nil {
+		t.Fatalf("ApplyEdits must succeed once the ARG-resolved pin is skipped: %v", err)
+	}
+}
+
 func TestExtract_ThirdPartyRepo(t *testing.T) {
 	src := `FROM debian:12-slim
 RUN curl -fsSL https://example.com/key.gpg | apt-key add - && \

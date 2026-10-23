@@ -5,10 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"strings"
+
+	"github.com/Arham1716/imgowner/internal/safeio"
 )
 
 // gitHubClient implements PRClient for GitHub via the REST API.
@@ -152,7 +153,10 @@ func (g *gitHubClient) do(req *http.Request) ([]byte, error) {
 		return nil, fmt.Errorf("http: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(resp.Body)
+	body, err := safeio.ReadAll(resp.Body, safeio.MaxHTTPBody, "github API response")
+	if err != nil {
+		return nil, fmt.Errorf("reading github API response: %w", err)
+	}
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("github API %s %s → %d: %s", req.Method, req.URL, resp.StatusCode, body)
 	}
