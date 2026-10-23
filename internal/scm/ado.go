@@ -5,10 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"strings"
+
+	"github.com/Arham1716/imgowner/internal/safeio"
 )
 
 // adoClient implements PRClient for Azure DevOps via the REST API.
@@ -164,7 +165,10 @@ func (a *adoClient) do(req *http.Request) ([]byte, error) {
 		return nil, fmt.Errorf("http: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(resp.Body)
+	body, err := safeio.ReadAll(resp.Body, safeio.MaxHTTPBody, "ADO API response")
+	if err != nil {
+		return nil, fmt.Errorf("reading ADO API response: %w", err)
+	}
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("ADO API %s %s → %d: %s", req.Method, req.URL, resp.StatusCode, body)
 	}

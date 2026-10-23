@@ -2,9 +2,9 @@ package dockerfile
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
+	"github.com/Arham1716/imgowner/internal/safeio"
 	"github.com/moby/buildkit/frontend/dockerfile/parser"
 )
 
@@ -40,7 +40,7 @@ func (f *File) FinalStage() *Stage {
 
 // Parse reads and parses the Dockerfile at path.
 func Parse(path string) (*File, error) {
-	data, err := os.ReadFile(path)
+	data, err := safeio.ReadFile(path, safeio.MaxDockerfile)
 	if err != nil {
 		return nil, fmt.Errorf("imgowner: reading dockerfile %s: %w", path, err)
 	}
@@ -49,6 +49,9 @@ func Parse(path string) (*File, error) {
 
 // ParseBytes parses Dockerfile content from a byte slice.
 func ParseBytes(data []byte) (*File, error) {
+	if len(data) > safeio.MaxDockerfile {
+		return nil, &safeio.TooLargeError{What: "dockerfile", Limit: safeio.MaxDockerfile}
+	}
 	result, err := parser.Parse(strings.NewReader(string(data)))
 	if err != nil {
 		return nil, fmt.Errorf("imgowner: parsing dockerfile: %w", err)
