@@ -172,6 +172,7 @@ func attributeCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 			// Write reports (FR-21, FR-22, FR-23).
 			if err := report.Write(report.Request{
 				Image:      imageRef,
+				Digest:     res.Digest,
 				BaseRef:    res.BaseRef,
 				Findings:   res.Findings,
 				Candidates: res.Candidates,
@@ -568,6 +569,7 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 			}
 			if err := report.Write(report.Request{
 				Image:      imageRef,
+				Digest:     res.Digest,
 				BaseRef:    baseRef,
 				Findings:   findings,
 				Candidates: candidates,
@@ -585,6 +587,7 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 					var commentBuf strings.Builder
 					_ = report.WriteToWriter(&commentBuf, report.Request{
 						Image:      imageRef,
+						Digest:     res.Digest,
 						BaseRef:    baseRef,
 						Findings:   findings,
 						Candidates: candidates,

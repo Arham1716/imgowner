@@ -218,6 +218,40 @@ jobs:
       - name: npm licences
         run: node .github/scripts/check-npm-licenses.mjs editors/vscode/package-lock.json
 
+  # FR-47..FR-50: builds and pushes 4 real fixture images to a throwaway,
+  # job-local registry, then runs the real built binary and real Trivy
+  # against each, cross-checking digests and layer DiffIDs against values
+  # computed independently by the registry and the container runtime.
+  realimage:
+    name: Real-image suite
+    runs-on: ubuntu-latest
+    services:
+      registry:
+        image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+        ports:
+          - 5000:5000
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install Trivy
+        run: |
+          .github/scripts/fetch-verified.sh \
+            https://github.com/aquasecurity/trivy/releases/download/v0.76.0/trivy_0.76.0_Linux-64bit.tar.gz \
+            e24b1c51293c1b15e4ba8d45bbc7891ba053f90278ec2698f3562c993e145fe7 \
+            trivy /usr/local/bin
+
+      - name: Run real-image suite
+        env:
+          REALIMAGE_REGISTRY: localhost:5000
+        run: go test -tags realimage -timeout 25m ./test/realimage/...
+
   # FR-46: every parser of untrusted input is fuzzed on every PR. A crash
   # fails the job and the crashing input is kept as an artifact.
   fuzz:
