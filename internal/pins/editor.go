@@ -50,6 +50,10 @@ func ApplyEdits(content []byte, edits []Edit) ([]byte, error) {
 	result := make([]byte, len(content))
 	copy(result, content)
 
+	// prevStart is the start of the edit applied just before this one, which
+	// sits later in the file. An edit reaching past it would overwrite bytes
+	// that edit already replaced, corrupting the Dockerfile.
+	prevStart := len(result)
 	for _, e := range sorted {
 		start := e.ByteOffset
 		end := start + len(e.OldVersion)
@@ -57,6 +61,10 @@ func ApplyEdits(content []byte, edits []Edit) ([]byte, error) {
 			return nil, fmt.Errorf("edit out of bounds: offset %d len %d in %d-byte file",
 				start, len(e.OldVersion), len(result))
 		}
+		if end > prevStart {
+			return nil, fmt.Errorf("edits overlap at offset %d", start)
+		}
+		prevStart = start
 		// Verify the expected old version is at the recorded offset.
 		actual := string(result[start:end])
 		if actual != e.OldVersion {
