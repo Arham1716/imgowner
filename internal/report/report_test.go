@@ -271,3 +271,46 @@ func TestWriteToWriter_NoFormatsIsNoop(t *testing.T) {
 		t.Errorf("no formats should write nothing, got %d bytes", buf.Len())
 	}
 }
+
+// Added for FR-48: the real-image test suite asserts the digest imgowner
+// scanned against one computed independently from the registry, which
+// requires the digest to actually reach the report.
+func TestRenderJSON_IncludesDigestWhenSet(t *testing.T) {
+	var buf bytes.Buffer
+	req := Request{Image: "myapp:latest", Digest: "sha256:abc123", BaseRef: "debian:12-slim"}
+	if err := renderJSON(&buf, req); err != nil {
+		t.Fatalf("renderJSON: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
+		t.Fatalf("output is not valid JSON: %v", err)
+	}
+	if decoded["digest"] != "sha256:abc123" {
+		t.Errorf("digest = %v, want sha256:abc123", decoded["digest"])
+	}
+}
+
+func TestRenderJSON_OmitsDigestWhenEmpty(t *testing.T) {
+	var buf bytes.Buffer
+	if err := renderJSON(&buf, Request{Image: "x", BaseRef: "y"}); err != nil {
+		t.Fatalf("renderJSON: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
+		t.Fatalf("output is not valid JSON: %v", err)
+	}
+	if _, present := decoded["digest"]; present {
+		t.Error("digest key should be omitted entirely when empty, not present as \"\"")
+	}
+}
+
+func TestRenderMarkdown_IncludesDigestWhenSet(t *testing.T) {
+	var buf bytes.Buffer
+	req := Request{Image: "myapp:latest", Digest: "sha256:abc123", BaseRef: "debian:12-slim"}
+	if err := renderMarkdown(&buf, req); err != nil {
+		t.Fatalf("renderMarkdown: %v", err)
+	}
+	if !strings.Contains(buf.String(), "sha256:abc123") {
+		t.Error("markdown output should include the digest when set")
+	}
+}

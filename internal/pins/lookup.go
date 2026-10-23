@@ -208,12 +208,18 @@ func isPlainVersion(s string) bool {
 	return s != "" && len(s) <= 256 && sanitizeVersion(s) == s
 }
 
-// sanitizeVersion allows only characters valid in Debian/Alpine version strings.
+// sanitizeVersion allows only characters valid in Debian/Alpine/RPM version
+// strings. RPM release tags commonly carry an underscore-separated erratum
+// suffix (e.g. "1.21.1-11.el9_8", "7.76.1-26.el9_3.2.0.1" on Rocky/RHEL), so
+// '_' must be included: without it, a real pinned version silently fails
+// isPlainVersion and every such pin is reported unknown instead of its real
+// status -- found via the real-image suite's Rocky fixture, where every
+// current Rocky release carries exactly this suffix.
 func sanitizeVersion(s string) string {
 	var b strings.Builder
 	for _, r := range s {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
-			(r >= '0' && r <= '9') || r == '.' || r == '-' || r == '+' || r == ':' || r == '~' {
+			(r >= '0' && r <= '9') || r == '.' || r == '-' || r == '+' || r == ':' || r == '~' || r == '_' {
 			b.WriteRune(r)
 		}
 	}

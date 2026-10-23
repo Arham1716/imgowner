@@ -103,3 +103,28 @@ func TestParseLookupOutput_RejectsInjectedVersion(t *testing.T) {
 		}
 	}
 }
+
+// RPM release tags commonly carry an underscore-separated erratum suffix on
+// Rocky/RHEL (e.g. "1.21.1-11.el9_8"). An earlier version of sanitizeVersion
+// did not allow '_', so every such real version silently failed
+// isPlainVersion and the pin was reported unknown instead of its real
+// status -- found via the real-image suite's Rocky fixture.
+func TestIsPlainVersion_AllowsRPMUnderscoreReleaseSuffix(t *testing.T) {
+	versions := []string{
+		"1.21.1-11.el9_8",
+		"7.76.1-26.el9_3.2.0.1",
+	}
+	for _, v := range versions {
+		if !isPlainVersion(v) {
+			t.Errorf("isPlainVersion(%q) = false, want true", v)
+		}
+	}
+}
+
+func TestParseLookupOutput_AcceptsRPMUnderscoreVersion(t *testing.T) {
+	pins := []Pin{{Package: "wget", Version: "1.21.1-11.el9_8", Status: StatusUnknown}}
+	got := parseLookupOutput([]byte("CURRENT|wget|1.21.1-11.el9_8|1.21.1-11.el9_8\n"), pins)
+	if got[0].Status != StatusCurrent || got[0].Available != "1.21.1-11.el9_8" {
+		t.Errorf("got status=%s available=%q, want current/1.21.1-11.el9_8", got[0].Status, got[0].Available)
+	}
+}
