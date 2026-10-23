@@ -117,7 +117,10 @@ var fixtures = []fixtureSpec{
 		// No resolvePin: PyPI never removes a published version, so the
 		// pinned requests==2.32.3 in fixtures/python-pip/requirements.txt
 		// never goes stale the way an apt/apk/dnf version literal would.
-		name: "python-pip",
+		// baseRef is still needed: FR-49's base-layer check applies to all
+		// four fixtures, not just the three with a pin to resolve.
+		name:    "python-pip",
+		baseRef: "python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704",
 	},
 }
 
@@ -293,8 +296,15 @@ func runImgowner(t *testing.T, args ...string) []byte {
 	cmd := exec.CommandContext(ctx, imgownerBin, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("imgowner %v: %v\nstderr: %s", args, err, stderr.String())
+	err := cmd.Run()
+	// imgowner warns on stderr for non-fatal conditions (e.g. a pin lookup
+	// container failing) and still exits 0; surface it either way so a
+	// resulting "status is unknown" assertion failure isn't a dead end.
+	if stderr.Len() > 0 {
+		t.Logf("imgowner %v stderr:\n%s", args, stderr.String())
+	}
+	if err != nil {
+		t.Fatalf("imgowner %v: %v", args, err)
 	}
 	return stdout.Bytes()
 }
@@ -329,8 +339,18 @@ func registryManifestDigest(t *testing.T, ref string) string {
 	return m.Digest
 }
 
+// registryDiffIDs returns ref's layer DiffIDs as recorded in its config, read
+// straight from the registry. The base images (debian/alpine/rockylinux/
+// python on Docker Hub) are published as multi-platform image indexes, and
+// imagetools inspect's .Image field is empty for an index ref -- there is no
+// single config to return until a platform is chosen. amd64PlatformRef
+// resolves the ref down to its linux/amd64 child manifest first, which is
+// also what imgowner itself scans (platform defaults to linux/amd64). Our own
+// pushed fixtures are already flat single-platform manifests (built with
+// --provenance=false --sbom=false), so this is a no-op for them.
 func registryDiffIDs(t *testing.T, ref string) []string {
 	t.Helper()
+	ref = amd64PlatformRef(t, ref)
 	out := captureJSON(t, "docker", "buildx", "imagetools", "inspect", ref, "--format", "{{json .Image}}")
 	var cfg struct {
 		RootFS struct {
@@ -338,9 +358,60 @@ func registryDiffIDs(t *testing.T, ref string) []string {
 		} `json:"rootfs"`
 	}
 	if err := json.Unmarshal([]byte(out), &cfg); err != nil {
-		t.Fatalf("parsing imagetools image config JSON: %v\nraw: %s", err, out)
+		t.Fatalf("parsing imagetools image config JSON for %s: %v\nraw: %s", ref, err, out)
+	}
+	if len(cfg.RootFS.DiffIDs) == 0 {
+		t.Fatalf("no diff_ids resolved for %s (raw image JSON: %s)", ref, out)
 	}
 	return cfg.RootFS.DiffIDs
+}
+
+// amd64PlatformRef returns ref unchanged if it already names a single
+// manifest, or the repository@digest of its linux/amd64 child if ref names a
+// multi-platform index. Decoding {{json .Manifest}} as plain JSON (rather
+// than templating over .Manifest.Manifests directly) avoids a hard template
+// error: an index and a single manifest are different underlying Go types in
+// buildx's template data, and ranging over .Manifests on a plain manifest
+// fails evaluation instead of yielding an empty range.
+func amd64PlatformRef(t *testing.T, ref string) string {
+	t.Helper()
+	raw := captureJSON(t, "docker", "buildx", "imagetools", "inspect", ref, "--format", "{{json .Manifest}}")
+	var m struct {
+		MediaType string `json:"mediaType"`
+		Manifests []struct {
+			Digest   string `json:"digest"`
+			Platform struct {
+				OS           string `json:"os"`
+				Architecture string `json:"architecture"`
+			} `json:"platform"`
+		} `json:"manifests"`
+	}
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		t.Fatalf("parsing imagetools manifest JSON for %s: %v\nraw: %s", ref, err, raw)
+	}
+	if !strings.Contains(m.MediaType, "index") && !strings.Contains(m.MediaType, "manifest.list") {
+		return ref // single manifest already; nothing to resolve.
+	}
+	for _, c := range m.Manifests {
+		if c.Platform.OS == "linux" && c.Platform.Architecture == "amd64" {
+			return repoName(ref) + "@" + c.Digest
+		}
+	}
+	t.Fatalf("index %s has no linux/amd64 manifest: %s", ref, raw)
+	return ""
+}
+
+// repoName strips a trailing "@sha256:..." or ":tag" from ref, leaving the
+// bare repository path. A registry address can itself contain ':' (a port),
+// so only a ':' after the last '/' is treated as a tag separator.
+func repoName(ref string) string {
+	if i := strings.LastIndex(ref, "@"); i >= 0 {
+		return ref[:i]
+	}
+	if i := strings.LastIndex(ref, ":"); i >= 0 && i > strings.LastIndex(ref, "/") {
+		return ref[:i]
+	}
+	return ref
 }
 
 func localDiffIDs(t *testing.T, ref string) []string {
