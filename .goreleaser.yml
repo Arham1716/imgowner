@@ -2,10 +2,11 @@ version: 2
 
 project_name: imgowner
 
-before:
-  hooks:
-    - go mod tidy
-    - go test ./...
+# No before.hooks: a release only ever runs against a tag whose commit is
+# already on main (release.yml verifies this), which only reaches main
+# through a staging promotion PR that already ran go mod tidy and go test in
+# CI. Re-running go mod tidy here could rewrite go.sum moments before
+# release, defeating the point of building from exactly what was reviewed.
 
 builds:
   - id: imgowner
@@ -23,6 +24,13 @@ builds:
     ignore:
       - goos: windows
         goarch: arm64
+    # NFR-16: reproducible builds. -trimpath removes the local build path from
+    # the binary; mod_timestamp pins file mtimes in the build to the tagged
+    # commit's own timestamp instead of wall-clock build time, so rebuilding
+    # the tag produces byte-identical output.
+    flags:
+      - -trimpath
+    mod_timestamp: "{{ .CommitTimestamp }}"
     ldflags:
       - -s -w
       - -X main.version={{.Version}}
@@ -43,6 +51,64 @@ checksum:
   name_template: checksums.txt
   algorithm: sha256
 
+# FR-43: an SBOM for each archive, signed the same way as the artifacts below.
+sboms:
+  - id: archives
+    artifacts: archive
+    documents:
+      - "${artifact}.spdx.json"
+    cmd: syft
+    args:
+      - "$artifact"
+      - --output
+      - "spdx-json=$document"
+
+# FR-42: every archive, the checksums file and every SBOM, signed keyless via
+# cosign using the release workflow's own GitHub OIDC identity -- no signing
+# key is stored anywhere. `cosign verify-blob` with
+# --certificate-identity-regexp '.*/.github/workflows/release.yml@.*' and
+# --certificate-oidc-issuer https://token.actions.githubusercontent.com
+# verifies any artifact against this identity.
+signs:
+  - cmd: cosign
+    certificate: "${artifact}.pem"
+    args:
+      - sign-blob
+      - "--output-signature=${signature}"
+      - "--output-certificate=${certificate}"
+      - "${artifact}"
+      - --yes
+    artifacts: all
+
+# FR-41/NFR-07: the container image distribution. Flat single-platform
+# manifest (--provenance=false --sbom=false) for the same reason the
+# real-image test fixtures use it: a clean, directly verifiable digest.
+dockers:
+  - use: buildx
+    goos: linux
+    goarch: amd64
+    dockerfile: Dockerfile
+    image_templates:
+      - "ghcr.io/arham1716/imgowner:{{ .Version }}"
+      - "ghcr.io/arham1716/imgowner:latest"
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--provenance=false"
+      - "--sbom=false"
+      - "--label=org.opencontainers.image.source=https://github.com/Arham1716/imgowner"
+      - "--label=org.opencontainers.image.version={{.Version}}"
+      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+
+# Signs the pushed image reference itself (not a local file), same keyless
+# identity as the signs block above.
+docker_signs:
+  - artifacts: all
+    cmd: cosign
+    args:
+      - sign
+      - --yes
+      - "${artifact}"
+
 changelog:
   sort: asc
   filters:
@@ -57,6 +123,9 @@ release:
   github:
     owner: Arham1716
     name: imgowner
-  draft: false
+  # Draft until release.yml's NFR-18 content check passes, then the workflow
+  # un-drafts it. A release that fails that check stays invisible to the
+  # public instead of shipping with project-infrastructure files in it.
+  draft: true
   prerelease: auto
   name_template: "v{{.Version}}"

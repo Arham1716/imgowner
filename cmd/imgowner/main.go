@@ -24,6 +24,16 @@ import (
 	"github.com/Arham1716/imgowner/internal/scm"
 )
 
+// version, commit and date are set via -ldflags at build time (see
+// .goreleaser.yml); they stay "dev"/"none"/"unknown" for a local `go build`.
+// A signed release's SBOM and cosign signature cover these exact values, so
+// `imgowner version` is how a user confirms which build they actually have.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 // exitError carries a specific OS exit code through cobra's error path.
 type exitError struct {
 	code  int
@@ -72,6 +82,8 @@ func rootCmd(ctx context.Context) *cobra.Command {
 		SilenceErrors: true,
 	}
 	root.PersistentFlags().StringVar(&cfgPath, "config", ".imgowner.yaml", "config file path")
+	root.Version = fmt.Sprintf("%s (commit %s, built %s)", version, commit, date)
+	root.SetVersionTemplate("imgowner {{.Version}}\n")
 
 	root.AddCommand(
 		attributeCmd(ctx, &cfgPath),
