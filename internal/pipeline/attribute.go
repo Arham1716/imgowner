@@ -88,7 +88,7 @@ func Attribute(ctx context.Context, req AttributeRequest) (*AttributeResult, err
 	base := image.ResolveBase(ctx, imgCF, baseRef, req.BaseDigest, req.Platform)
 
 	findings := attribution.Classify(result.Results, layerMap, base)
-	findings = attribution.MapToDockerfileLines(findings, layerMap)
+	findings = attribution.MapToDockerfileLines(findings, layerMap, df)
 
 	out := &AttributeResult{
 		Findings: findings,

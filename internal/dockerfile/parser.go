@@ -106,12 +106,42 @@ func ParseBytes(data []byte) (*File, error) {
 // ResolveBaseRef substitutes ARG variables in the FROM argument using the
 // global ARG defaults collected during parsing.
 func (f *File) ResolveBaseRef(stage *Stage) string {
-	ref := stage.BaseRef
+	ref := f.substituteArgs(stage.BaseRef)
+
+	// A multi-stage build's FROM can name an earlier stage instead of an
+	// external image ("FROM base AS app" referencing an earlier
+	// "... AS base"). Docker resolves that by stage name, not as a registry
+	// pull, so follow the chain to the ultimate external image: the one FR-04
+	// actually needs to diff layers against. Bounded by len(Stages)+1 so a
+	// malformed file can't loop forever; a real Dockerfile can only reference
+	// stages defined earlier than itself, so no cycle is reachable here.
+	for i := 0; i <= len(f.Stages); i++ {
+		next, ok := f.stageRefByName(ref)
+		if !ok {
+			return ref
+		}
+		ref = f.substituteArgs(next)
+	}
+	return ref
+}
+
+func (f *File) substituteArgs(ref string) string {
 	for k, v := range f.Args {
 		ref = strings.ReplaceAll(ref, "${"+k+"}", v)
 		ref = strings.ReplaceAll(ref, "$"+k, v)
 	}
 	return ref
+}
+
+// stageRefByName returns the BaseRef of the stage named name (matched the way
+// Docker matches a FROM target against an AS alias), if one exists.
+func (f *File) stageRefByName(name string) (string, bool) {
+	for i := range f.Stages {
+		if f.Stages[i].Name != "" && strings.EqualFold(f.Stages[i].Name, name) {
+			return f.Stages[i].BaseRef, true
+		}
+	}
+	return "", false
 }
 
 // joinArgs reconstructs an instruction's argument string from the parser's
