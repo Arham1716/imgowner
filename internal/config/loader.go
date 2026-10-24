@@ -16,12 +16,12 @@ import (
 // Config is the fully resolved configuration for imgowner.
 // Precedence: CLI flags > .imgowner.yaml > built-in defaults.
 type Config struct {
-	Version int    `yaml:"version"`
-	Scan    Scan   `yaml:"scan"`
-	Policy  Policy `yaml:"policy"`
-	Pins    Pins   `yaml:"pins"`
-	Report  Report `yaml:"report"`
-	SCM     SCM    `yaml:"scm"`
+	Version int     `yaml:"version"`
+	Scan    Scan    `yaml:"scan"`
+	Policy  Policy  `yaml:"policy"`
+	Pins    Pins    `yaml:"pins"`
+	Report  Report  `yaml:"report"`
+	SCM     SCM     `yaml:"scm"`
 	History History `yaml:"history"`
 }
 

@@ -166,8 +166,8 @@ func testFixture(t *testing.T, f fixtureSpec) {
 
 	assertHistoryRecord(t, histDir, report.Digest, report.Findings) // FR-31
 	assertNoHistoryOnToolError(t, cfgPath, histDir, dfPath)         // FR-31: exit 2 records nothing
-	assertDigestAndLayers(t, ref, report.Digest, report.Findings)  // FR-48
-	assertAttribution(t, f, dfPath, report.Findings)              // FR-49
+	assertDigestAndLayers(t, ref, report.Digest, report.Findings)   // FR-48
+	assertAttribution(t, f, dfPath, report.Findings)                // FR-49
 
 	if f.pkgManager != "" {
 		assertPin(t, f, dfPath, cfgPath) // FR-50
