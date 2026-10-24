@@ -133,8 +133,13 @@ jobs:
 
       # Dev-only dependencies, but the extension ships from a security tool's
       # repo; a HIGH advisory in its own toolchain should not go unnoticed.
+      # Fails on any HIGH/CRITICAL advisory unless it's a reviewed, written
+      # exception in .github/audit-exceptions.json (NFR-44) -- a bare
+      # `npm audit` would otherwise block every PR the next time any
+      # transitive dev dependency gets a new advisory with no fix out yet.
       - name: Audit
-        run: npm audit --audit-level=high
+        working-directory: ${{ github.workspace }} # escape the job's editors/vscode default; the script takes a repo-relative path
+        run: node .github/scripts/check-npm-audit.mjs editors/vscode
 
       # @types/vscode is pinned to the engines.vscode floor, so this fails if
       # the code uses any API newer than the oldest VS Code it claims to support.

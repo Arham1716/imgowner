@@ -1,0 +1,10 @@
+{
+  "editors/vscode": [
+    {
+      "ghsa": "GHSA-xcx6-jx8p-x3h5",
+      "package": "@azure/msal-node",
+      "reason": "Transitive dev dependency of @vscode/vsce (via @azure/identity), used only by vsce's interactive 'publish' auth flow. CI only ever runs 'vsce package', never 'vsce publish' -- Marketplace publishing stays manual by design, so this code path is never exercised. No stable @azure/identity release fixes this yet as of the review date (4.15.0 exists only as a beta); remove this entry once one ships and the lockfile is updated.",
+      "reviewed": "2026-10-24"
+    }
+  ]
+}
