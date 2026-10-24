@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { getScan } from "./api";
+import type { CSSProperties } from "react";
 import { shortDigest } from "./format";
+import { Card } from "./Widgets";
 import type { ScanRecord } from "./types";
 
 // Candidate base-image tags recorded with a scan, fewest remaining CVEs first,
@@ -42,10 +44,29 @@ export function BaseImages({ scanId }: { scanId: string | null }) {
     );
   }
 
+  const ok = rows.filter((c) => !c.failed);
+  const best = ok[0];
+  const currentTotal = best ? best.cves_remaining + best.cves_removed : 0;
+  const maxBar = Math.max(currentTotal, ...ok.map((c) => c.cves_remaining), 1);
+
   return (
-    <div className="card">
+    <>
+      {best && best.cves_removed > 0 && (
+        <section className="reco">
+          <div>
+            <span className="tag-pill">Recommended</span>
+            <div className="big">{best.cves_removed} fewer CVEs</div>
+            <p className="dim" style={{ margin: "2px 0 0" }}>
+              Move your base to <b className="mono">{best.tag}</b>
+              {currentTotal > 0 ? ` — ${Math.round((best.cves_removed * 100) / currentTotal)}% fewer than ${rec.summary.base_ref || "your current base"}` : ""}.
+            </p>
+          </div>
+        </section>
+      )}
+    <Card title="Candidate base images" hint="Patch tags of your current base, scanned and ranked. Shorter bar = fewer CVEs.">
       <p className="dim" style={{ marginTop: 0 }}>
         Current base: <span className="mono">{rec.summary.base_ref || "unknown"}</span>
+        {currentTotal > 0 ? ` · ${currentTotal} CVEs` : ""}
       </p>
       <div className="tablewrap">
         <table>
@@ -54,9 +75,7 @@ export function BaseImages({ scanId }: { scanId: string | null }) {
             <tr>
               <th scope="col">Tag</th>
               <th scope="col">Digest</th>
-              <th scope="col" className="num">
-                CVEs remaining
-              </th>
+              <th scope="col">CVEs remaining</th>
               <th scope="col" className="num">
                 Change vs current base
               </th>
@@ -73,7 +92,12 @@ export function BaseImages({ scanId }: { scanId: string | null }) {
                   </td>
                 ) : (
                   <>
-                    <td className="num">{c.cves_remaining}</td>
+                    <td style={{ minWidth: 170 }}>
+                      <div className="stack thin" style={{ width: `${Math.max((c.cves_remaining * 100) / maxBar, 4)}%` }}>
+                        <span style={{ "--c": c.cves_removed > 0 ? "var(--good)" : c.cves_removed < 0 ? "var(--critical)" : "var(--ink-3)", "--v": 1 } as CSSProperties} />
+                      </div>
+                      <span className="mono">{c.cves_remaining}</span>
+                    </td>
                     <td className="num">
                       {c.cves_removed > 0 ? (
                         <span style={{ color: "var(--good-text)" }}>▼ {c.cves_removed} fewer</span>
@@ -90,6 +114,7 @@ export function BaseImages({ scanId }: { scanId: string | null }) {
           </tbody>
         </table>
       </div>
-    </div>
+    </Card>
+    </>
   );
 }

@@ -86,6 +86,7 @@ export function TrendChart({ scans, themeKey }: { scans: Summary[]; themeKey: st
           const items = OWNERS.map((o, i) => ({
             text: OWNER_LABEL[o] ?? o,
             // With canvas=true valToPos is already canvas-absolute (device px).
+            y0: u.valToPos(data[i + 1]?.[last] ?? 0, "y", true),
             y: u.valToPos(data[i + 1]?.[last] ?? 0, "y", true),
           })).sort((a, b) => a.y - b.y);
           const gap = 15 * dpr;
@@ -101,7 +102,18 @@ export function TrendChart({ scans, themeKey }: { scans: Summary[]; themeKey: st
           ctx.textAlign = "left"; // uPlot leaves the axes' centre alignment set on the shared context
           ctx.fillStyle = ink2; // text wears the text token; the line carries the colour
           const x = u.valToPos(xs[last] ?? 0, "x", true) + 10 * dpr;
-          for (const it of items) ctx.fillText(it.text, x, it.y);
+          for (const it of items) {
+            // A leader line ties a nudged label back to its own line end.
+            if (Math.abs(it.y - it.y0) > 2 * dpr) {
+              ctx.strokeStyle = ink3;
+              ctx.lineWidth = dpr;
+              ctx.beginPath();
+              ctx.moveTo(x - 8 * dpr, it.y0);
+              ctx.lineTo(x - 2 * dpr, it.y);
+              ctx.stroke();
+            }
+            ctx.fillText(it.text, x, it.y);
+          }
           ctx.restore();
         },
       },
