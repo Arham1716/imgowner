@@ -30,3 +30,7 @@ scm:
   labels:
     - security
     - dependencies
+
+history:
+  enabled: true
+  retention_days: 90

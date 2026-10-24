@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -149,5 +150,37 @@ func TestDefaults_IsStableAcrossCalls(t *testing.T) {
 	a, b := Defaults(), Defaults()
 	if !reflect.DeepEqual(a, b) {
 		t.Error("Defaults() must be deterministic")
+	}
+}
+
+func TestDefaults_HistoryRetentionIs90Days(t *testing.T) {
+	h := Defaults().History
+	if !h.Enabled || h.RetentionDays != 90 {
+		t.Errorf("history defaults = %+v, want enabled with 90 retention days", h)
+	}
+}
+
+func TestLoad_HistoryRetentionOverride(t *testing.T) {
+	cfg, err := Load(writeConfig(t, "history:\n  retention_days: 30\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.History.RetentionDays != 30 || !cfg.History.Enabled {
+		t.Errorf("history = %+v, want 30 days and still enabled", cfg.History)
+	}
+}
+
+// FR-32: retention_days: 0 would delete every record as it is written, so it
+// is rejected outright (exit 2) instead of silently disabling history.
+func TestLoad_HistoryRetentionBelowOneIsRejected(t *testing.T) {
+	for _, v := range []string{"0", "-5"} {
+		_, err := Load(writeConfig(t, "history:\n  retention_days: "+v+"\n"))
+		var ic *ErrInvalidConfig
+		if !errors.As(err, &ic) {
+			t.Fatalf("retention_days %s: expected *ErrInvalidConfig, got %v", v, err)
+		}
+		if ic.Key != "history.retention_days" {
+			t.Errorf("key = %q, want history.retention_days", ic.Key)
+		}
 	}
 }

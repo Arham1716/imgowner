@@ -15,6 +15,7 @@ import (
 	"github.com/Arham1716/imgowner/internal/attribution"
 	"github.com/Arham1716/imgowner/internal/config"
 	"github.com/Arham1716/imgowner/internal/dockerfile"
+	"github.com/Arham1716/imgowner/internal/history"
 	"github.com/Arham1716/imgowner/internal/image"
 	"github.com/Arham1716/imgowner/internal/pins"
 	"github.com/Arham1716/imgowner/internal/pipeline"
@@ -192,6 +193,15 @@ func attributeCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 			}); err != nil {
 				return writeStructuredError(map[string]string{"error": err.Error()})
 			}
+			recordHistory(cfg, history.Input{
+				Command:    "attribute",
+				Image:      imageRef,
+				Digest:     res.Digest,
+				BaseRef:    res.BaseRef,
+				Dockerfile: dockerfilePath,
+				Findings:   res.Findings,
+				Candidates: res.Candidates,
+			})
 			return nil
 		},
 	}
@@ -252,7 +262,14 @@ func pinsCheckCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 			if err != nil {
 				return writeStructuredError(map[string]string{"error": err.Error()})
 			}
+			pinsImage := imageRef
+			if pinsImage == "" {
+				if final := df.FinalStage(); final != nil {
+					pinsImage = df.ResolveBaseRef(final)
+				}
+			}
 			if len(pinList) == 0 {
+				recordHistory(cfg, history.Input{Command: "pins-check", Image: pinsImage, Dockerfile: dockerfilePath})
 				if strings.EqualFold(format, "json") {
 					fmt.Println("[]")
 				} else {
@@ -275,6 +292,13 @@ func pinsCheckCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 			if err != nil {
 				return writeStructuredError(map[string]string{"error": err.Error()})
 			}
+
+			recordHistory(cfg, history.Input{
+				Command:    "pins-check",
+				Image:      pinsImage,
+				Dockerfile: dockerfilePath,
+				Pins:       pinList,
+			})
 
 			if strings.EqualFold(format, "json") {
 				enc := json.NewEncoder(os.Stdout)
@@ -590,6 +614,17 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 			}); err != nil {
 				return writeStructuredError(map[string]string{"error": err.Error()})
 			}
+			// Recorded before the policy verdict is returned: a breach (exit 1)
+			// is a completed scan and belongs in the history too (FR-31).
+			recordHistory(cfg, history.Input{
+				Command:    "ci",
+				Image:      imageRef,
+				Digest:     res.Digest,
+				BaseRef:    baseRef,
+				Dockerfile: dockerfilePath,
+				Findings:   findings,
+				Candidates: candidates,
+			})
 
 			// ── SCM comment (FR-24) ───────────────────────────────────────
 			if prID != "" {
@@ -739,6 +774,8 @@ func structuredScanErr(err error) map[string]string {
 			"host":  e.Host,
 			"hint":  "authenticate with `docker login " + e.Host + "` or lower scan.base_candidates",
 		}
+	case *config.ErrInvalidConfig:
+		return map[string]string{"error": "invalid config", "key": e.Key, "reason": e.Reason}
 	case *image.ErrRegistryUnreachable:
 		return map[string]string{
 			"error": "registry unreachable",

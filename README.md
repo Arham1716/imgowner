@@ -142,6 +142,30 @@ pins:
 base image will not fail your build, because you cannot fix it without changing
 the base.
 
+## Scan history
+
+Every successful `attribute`, `ci` and `pins check` run is recorded in a small
+history store on your own machine, which the local dashboard reads. Nothing
+is ever sent anywhere, and no registry credentials or tokens are stored.
+
+| Platform | Location |
+|---|---|
+| Linux | `$XDG_STATE_HOME/imgowner/history` (default `~/.local/state/imgowner/history`) |
+| macOS | `~/Library/Application Support/imgowner/history` |
+| Windows | `%LOCALAPPDATA%\imgowner\history` |
+
+Records are one JSON file per scan, readable only by you, and records older
+than `history.retention_days` (default 90) are deleted each time a new one is
+written. A failure to write history is a warning on stderr and never changes
+a scan's exit code.
+
+```yaml
+history:
+  enabled: true        # set false to record nothing (e.g. in CI)
+  retention_days: 90   # must be at least 1
+  dir: ""            # override the location above
+```
+
 ## How it works
 
 1. The image reference is resolved to a digest and scanned with Trivy.
