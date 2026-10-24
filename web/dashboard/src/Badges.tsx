@@ -55,3 +55,11 @@ export const OWNER_LABEL: Record<string, string> = {
 export function OwnerDot({ owner }: { owner: string }) {
   return <span className="dot" style={{ "--c": `var(${OWNER_VAR[owner] ?? "--ink-3"})` } as CSSProperties} aria-hidden="true" />;
 }
+
+export const SEV_COLOR: Record<string, string> = {
+  CRITICAL: "var(--critical)",
+  HIGH: "var(--serious)",
+  MEDIUM: "var(--warning)",
+  LOW: "var(--sev-low)",
+  UNKNOWN: "var(--sev-unknown)",
+};

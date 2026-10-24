@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { getScan } from "./api";
-import { OWNER_LABEL, OwnerDot, SeverityBadge } from "./Badges";
+import type { CSSProperties } from "react";
+import { OWNER_LABEL, OwnerDot, SEV_COLOR, SeverityBadge } from "./Badges";
 import { SEVERITIES, severityRank } from "./format";
+import { Card } from "./Widgets";
 import type { Finding, ScanRecord } from "./types";
 import { OWNERS } from "./types";
 
@@ -53,8 +55,21 @@ export function Findings({ scanId }: { scanId: string | null }) {
   if (!rec) return <div className="card empty">Loading…</div>;
 
   const total = rec.findings?.length ?? 0;
+  const sevCount: Record<string, number> = {};
+  for (const f of rec.findings ?? []) {
+    const k = f.severity.toUpperCase();
+    sevCount[k] = (sevCount[k] ?? 0) + 1;
+  }
   return (
-    <div className="card">
+    <Card title="Findings in this scan" hint="Pick a severity chip to narrow the table; click it again to clear.">
+      <div className="chips" style={{ marginBottom: 14 }} role="group" aria-label="Filter by severity">
+        {SEVERITIES.map((s) => (
+          <button key={s} className="chip" aria-pressed={severity === s} onClick={() => setSeverity(severity === s ? "" : s)} disabled={!sevCount[s]}>
+            <i className="sq" style={{ "--c": SEV_COLOR[s] } as CSSProperties} />
+            {s[0] + s.slice(1).toLowerCase()} <b>{sevCount[s] ?? 0}</b>
+          </button>
+        ))}
+      </div>
       <div className="filters">
         <label className="field">
           Owner
@@ -63,17 +78,6 @@ export function Findings({ scanId }: { scanId: string | null }) {
             {OWNERS.map((o) => (
               <option key={o} value={o}>
                 {OWNER_LABEL[o]}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="field">
-          Severity
-          <select value={severity} onChange={(e) => setSeverity(e.target.value)}>
-            <option value="">All severities</option>
-            {SEVERITIES.map((s) => (
-              <option key={s} value={s}>
-                {s}
               </option>
             ))}
           </select>
@@ -110,7 +114,7 @@ export function Findings({ scanId }: { scanId: string | null }) {
             </thead>
             <tbody>
               {rows.slice(0, shown).map((f, i) => (
-                <tr key={`${f.cve}|${f.package}|${f.installed_version}|${i}`}>
+                <tr className="sev-row" style={{ "--rc": SEV_COLOR[f.severity.toUpperCase()] ?? "transparent" } as CSSProperties} key={`${f.cve}|${f.package}|${f.installed_version}|${i}`}>
                   <td className="mono">{f.cve}</td>
                   <td>
                     <SeverityBadge severity={f.severity} />
@@ -146,6 +150,6 @@ export function Findings({ scanId }: { scanId: string | null }) {
           )}
         </div>
       )}
-    </div>
+    </Card>
   );
 }
