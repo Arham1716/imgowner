@@ -90,6 +90,7 @@ func rootCmd(ctx context.Context) *cobra.Command {
 		attributeCmd(ctx, &cfgPath),
 		pinsCmd(ctx, &cfgPath),
 		ciCmd(ctx, &cfgPath),
+		dashboardCmd(ctx, &cfgPath),
 	)
 	return root
 }

@@ -221,7 +221,55 @@ jobs:
         run: go-licenses check ./... --disallowed_types=forbidden,restricted,unknown
 
       - name: npm licences
-        run: node .github/scripts/check-npm-licenses.mjs editors/vscode/package-lock.json
+        run: node .github/scripts/check-npm-licenses.mjs editors/vscode/package-lock.json web/dashboard/package-lock.json
+
+  # FR-33, NFR-11, NFR-15, NFR-19: the dashboard's compiled bundle is committed
+  # (so `go install` users get it without Node); this rebuilds it from source
+  # and fails on any difference, so no hand-edited or stale JavaScript can sit
+  # in internal/dashboard/dist unnoticed.
+  dashboard:
+    name: Dashboard bundle
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web/dashboard
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/dashboard/package-lock.json
+
+      - name: Dependency budget and exact pins
+        working-directory: ${{ github.workspace }}
+        run: node .github/scripts/check-dashboard-deps.mjs web/dashboard/package.json
+
+      # --ignore-scripts: no dependency runs code at install time (NFR-15).
+      - name: Install
+        run: npm ci --ignore-scripts
+
+      - name: Audit
+        working-directory: ${{ github.workspace }}
+        run: node .github/scripts/check-npm-audit.mjs web/dashboard
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Committed bundle matches a fresh build
+        working-directory: ${{ github.workspace }}
+        run: |
+          if [ -n "$(git status --porcelain -- internal/dashboard/dist)" ]; then
+            git status --porcelain -- internal/dashboard/dist
+            echo "::error::internal/dashboard/dist differs from what web/dashboard builds. Run 'npm ci && npm run build' in web/dashboard (on Linux, or in a node container) and commit the result."
+            exit 1
+          fi
 
   # FR-47..FR-50: builds and pushes 4 real fixture images to a throwaway,
   # job-local registry, then runs the real built binary and real Trivy
@@ -273,6 +321,8 @@ jobs:
           - { pkg: ./internal/attribution, target: FuzzAttribute }
           - { pkg: ./internal/history, target: FuzzDecodeRecord }
           - { pkg: ./internal/history, target: FuzzDecodeSummary }
+          - { pkg: ./internal/dashboard, target: FuzzParseScanQuery }
+          - { pkg: ./internal/dashboard, target: FuzzRepository }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

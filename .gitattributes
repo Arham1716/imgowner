@@ -1,0 +1,5 @@
+# The dashboard's sources are rebuilt in CI on Linux and compared byte-for-byte
+# with the committed bundle, so neither may be rewritten by line-ending
+# conversion on a contributor's machine.
+web/dashboard/** text eol=lf
+internal/dashboard/dist/** -text
