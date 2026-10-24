@@ -65,25 +65,30 @@ sboms:
 
 # FR-42: every archive, the checksums file and every SBOM, signed keyless via
 # cosign using the release workflow's own GitHub OIDC identity -- no signing
-# key is stored anywhere. `cosign verify-blob` with
-# --certificate-identity-regexp '.*/.github/workflows/release.yml@.*' and
-# --certificate-oidc-issuer https://token.actions.githubusercontent.com
-# verifies any artifact against this identity.
+# key is stored anywhere. Each artifact gets one <artifact>.bundle file
+# (cosign's current Sigstore bundle format: signature + certificate +
+# transparency log entry in one JSON file). `cosign verify-blob --bundle
+# <artifact>.bundle` with --certificate-identity-regexp
+# '.*/.github/workflows/release.yml@.*' and --certificate-oidc-issuer
+# https://token.actions.githubusercontent.com verifies it against this
+# identity.
+#
+# v0.3.0's first two release attempts used the older separate .sig/.pem
+# output (--output-signature/--output-certificate with
+# --new-bundle-format=false): the first failed because --new-bundle-format
+# wasn't set at all (cosign defaulted to the new format and wrote nowhere);
+# setting it to false then failed a *different*, newer check --
+# --use-signing-config defaults to true and requires --new-bundle-format
+# (i.e. true) whenever it's in effect, which --new-bundle-format=false
+# directly contradicts. Rather than fight cosign's own default validation
+# with more flags, this uses the format cosign's current defaults actually
+# want.
 signs:
   - cmd: cosign
-    certificate: "${artifact}.pem"
+    signature: "${artifact}.bundle"
     args:
       - sign-blob
-      # cosign now defaults to its new bundle format, under which
-      # --output-signature/--output-certificate are deprecated and silently
-      # write nowhere (the actual output goes to --bundle, which goreleaser's
-      # own invocation doesn't set) -- found when v0.3.0's first real release
-      # run failed signing with "create bundle file: open : no such file or
-      # directory". Forcing the old format keeps the separate .sig/.pem files
-      # the verification instructions below rely on.
-      - --new-bundle-format=false
-      - "--output-signature=${signature}"
-      - "--output-certificate=${certificate}"
+      - "--bundle=${signature}"
       - "${artifact}"
       - --yes
     artifacts: all
