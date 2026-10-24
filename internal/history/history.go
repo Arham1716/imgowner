@@ -199,6 +199,13 @@ func Open(dir string) (*Store, error) {
 	return &Store{dir: dir, now: time.Now}, nil
 }
 
+// WithClock returns a Store over the same directory that stamps records (and
+// judges their age) with now instead of the wall clock. It exists so callers'
+// tests can control time without sleeping.
+func (s *Store) WithClock(now func() time.Time) *Store {
+	return &Store{dir: s.dir, now: now}
+}
+
 // Dir returns the directory the store uses.
 func (s *Store) Dir() string { return s.dir }
 

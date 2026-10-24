@@ -1,0 +1,192 @@
+import { useEffect, useMemo, useState } from "react";
+import { ApiError, listScans } from "./api";
+import { BaseImages } from "./BaseImages";
+import { Findings } from "./Findings";
+import { fmtDate, sum } from "./format";
+import { Overview } from "./Overview";
+import { Pins } from "./Pins";
+import type { Summary } from "./types";
+
+type Tab = "overview" | "findings" | "pins" | "base";
+const TABS: { id: Tab; label: string }[] = [
+  { id: "overview", label: "Overview" },
+  { id: "findings", label: "Findings" },
+  { id: "pins", label: "Pins" },
+  { id: "base", label: "Base images" },
+];
+const RANGES = [7, 30, 90] as const;
+type Theme = "auto" | "light" | "dark";
+
+// Theme choice is a per-viewer convenience; storage may be blocked, so every
+// access is guarded and the page works without it.
+function loadTheme(): Theme {
+  try {
+    const t = localStorage.getItem("imgowner-theme");
+    return t === "light" || t === "dark" ? t : "auto";
+  } catch {
+    return "auto";
+  }
+}
+
+function applyTheme(t: Theme) {
+  if (t === "auto") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", t);
+}
+
+export function App() {
+  const [scans, setScans] = useState<Summary[] | null>(null);
+  const [error, setError] = useState<ApiError | Error | null>(null);
+  const [tab, setTab] = useState<Tab>("overview");
+  const [repo, setRepo] = useState("");
+  const [days, setDays] = useState<number>(90);
+  const [scanId, setScanId] = useState<string | null>(null);
+  const [theme, setTheme] = useState<Theme>(loadTheme);
+  const [osDark, setOsDark] = useState(() => matchMedia("(prefers-color-scheme: dark)").matches);
+
+  useEffect(() => {
+    applyTheme(theme);
+    try {
+      if (theme === "auto") localStorage.removeItem("imgowner-theme");
+      else localStorage.setItem("imgowner-theme", theme);
+    } catch {
+      /* storage unavailable: the choice just won't persist */
+    }
+  }, [theme]);
+
+  useEffect(() => {
+    const mq = matchMedia("(prefers-color-scheme: dark)");
+    const on = () => setOsDark(mq.matches);
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
+
+  // The chart paints with resolved colours, so it must redraw when the
+  // effective theme changes.
+  const themeKey = theme === "auto" ? (osDark ? "dark" : "light") : theme;
+
+  useEffect(() => {
+    let live = true;
+    listScans(90)
+      .then((r) => live && setScans(r.scans))
+      .catch((e: Error) => live && setError(e));
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  const repos = useMemo(() => [...new Set((scans ?? []).filter((s) => s.command !== "pins-check").map((s) => s.repository))].sort(), [scans]);
+  const activeRepo = repo && repos.includes(repo) ? repo : (repos[0] ?? "");
+
+  const cutoff = Date.now() - days * 86_400_000;
+  const attribution = useMemo(
+    () => (scans ?? []).filter((s) => s.command !== "pins-check" && s.repository === activeRepo && Date.parse(s.timestamp) >= cutoff),
+    [scans, activeRepo, cutoff],
+  );
+
+  // Default to the newest scan in view; keep the user's pick while it's still listed.
+  const effectiveScanId = attribution.some((s) => s.id === scanId) ? scanId : (attribution[0]?.id ?? null);
+
+  if (error) {
+    const expired = error instanceof ApiError && error.status === 401;
+    return (
+      <div className="app">
+        <h1>imgowner dashboard</h1>
+        <div className="card error" role="alert">
+          {expired
+            ? "This session isn't valid. Stop the dashboard and run `imgowner dashboard` again, then open the URL it prints."
+            : `Could not load scan history: ${error.message}`}
+        </div>
+      </div>
+    );
+  }
+  if (!scans) {
+    return (
+      <div className="app">
+        <h1>imgowner dashboard</h1>
+        <div className="empty">Loading…</div>
+      </div>
+    );
+  }
+
+  const hasAny = scans.length > 0;
+  return (
+    <div className="app">
+      <div className="top">
+        <div>
+          <h1>imgowner dashboard</h1>
+          <p className="sub">Your local scan history. Read-only; nothing leaves this machine.</p>
+        </div>
+        <div className="seg" role="group" aria-label="Colour theme">
+          {(["auto", "light", "dark"] as const).map((t) => (
+            <button key={t} aria-pressed={theme === t} onClick={() => setTheme(t)}>
+              {t === "auto" ? "Auto" : t === "light" ? "Light" : "Dark"}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="tabs" role="tablist" aria-label="Views">
+        {TABS.map((t) => (
+          <button key={t.id} role="tab" className="tab" aria-selected={tab === t.id} onClick={() => setTab(t.id)}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {!hasAny ? (
+        <div className="card empty">
+          <p>No scans recorded yet.</p>
+          <p>
+            Run <span className="mono">imgowner attribute --image &lt;ref&gt; --dockerfile Dockerfile</span> and refresh this page.
+          </p>
+        </div>
+      ) : (
+        <>
+          {tab !== "pins" && (
+            <div className="filters">
+              <label className="field">
+                Repository
+                <select value={activeRepo} onChange={(e) => setRepo(e.target.value)}>
+                  {repos.map((r) => (
+                    <option key={r} value={r}>
+                      {r}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="field">
+                Range
+                <div className="seg" role="group" aria-label="Date range">
+                  {RANGES.map((d) => (
+                    <button key={d} aria-pressed={days === d} onClick={() => setDays(d)}>
+                      Last {d} days
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {(tab === "findings" || tab === "base") && attribution.length > 0 && (
+                <label className="field">
+                  Scan
+                  <select value={effectiveScanId ?? ""} onChange={(e) => setScanId(e.target.value)}>
+                    {attribution.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {fmtDate(s.timestamp)} · {sum(s.counts)} findings · {s.image}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+            </div>
+          )}
+
+          <div role="tabpanel">
+            {tab === "overview" && <Overview scans={attribution} themeKey={themeKey} />}
+            {tab === "findings" && <Findings scanId={effectiveScanId} />}
+            {tab === "pins" && <Pins />}
+            {tab === "base" && <BaseImages scanId={effectiveScanId} />}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}

@@ -29,3 +29,9 @@ updates:
       # would let code compile against APIs older VS Code versions don't have.
       # Bump together with engines.vscode, never on its own.
       - dependency-name: "@types/vscode"
+
+  # The dashboard's source (built output is committed; see ci.yml's dashboard job).
+  - package-ecosystem: npm
+    directory: /web/dashboard
+    schedule:
+      interval: weekly
