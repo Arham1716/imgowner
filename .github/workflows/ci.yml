@@ -271,6 +271,8 @@ jobs:
           - { pkg: ./internal/pins, target: FuzzParseLookupOutput }
           - { pkg: ./internal/pins, target: FuzzApplyEdits }
           - { pkg: ./internal/attribution, target: FuzzAttribute }
+          - { pkg: ./internal/history, target: FuzzDecodeRecord }
+          - { pkg: ./internal/history, target: FuzzDecodeSummary }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -22,6 +22,7 @@ type Config struct {
 	Pins    Pins   `yaml:"pins"`
 	Report  Report `yaml:"report"`
 	SCM     SCM    `yaml:"scm"`
+	History History `yaml:"history"`
 }
 
 type Scan struct {
@@ -57,6 +58,42 @@ type SCM struct {
 	Labels       []string `yaml:"labels"`
 }
 
+// History configures the local scan history store (FR-31, FR-32). It lives
+// on the user's own machine and is never transmitted anywhere (NFR-12).
+type History struct {
+	// Enabled turns recording off entirely; useful in CI, where nothing ever
+	// reads the store.
+	Enabled bool `yaml:"enabled"`
+	// RetentionDays is how long a record is kept; older ones are deleted on
+	// every write. Must be at least 1: zero would silently delete every
+	// record the moment it is written, which is never what anyone means.
+	RetentionDays int `yaml:"retention_days"`
+	// Dir overrides the per-user default location (see history.DefaultDir).
+	Dir string `yaml:"dir"`
+}
+
+// ErrInvalidConfig reports a config value that parsed but is not acceptable.
+type ErrInvalidConfig struct {
+	Key    string
+	Reason string
+}
+
+func (e *ErrInvalidConfig) Error() string {
+	return fmt.Sprintf("imgowner: invalid config %s: %s", e.Key, e.Reason)
+}
+
+// Validate checks values that are structurally valid YAML but semantically
+// unusable.
+func (c Config) Validate() error {
+	if c.History.RetentionDays < 1 {
+		return &ErrInvalidConfig{
+			Key:    "history.retention_days",
+			Reason: fmt.Sprintf("must be at least 1 (got %d)", c.History.RetentionDays),
+		}
+	}
+	return nil
+}
+
 // Defaults returns a Config populated with built-in defaults.
 func Defaults() Config {
 	return Config{
@@ -86,6 +123,10 @@ func Defaults() Config {
 			Provider:     "auto",
 			Comment:      "update",
 			BranchPrefix: "fix/os-pins",
+		},
+		History: History{
+			Enabled:       true,
+			RetentionDays: 90,
 		},
 	}
 }
@@ -134,5 +175,8 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("imgowner: config error in %s: %w", path, err)
 	}
 
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
 }
