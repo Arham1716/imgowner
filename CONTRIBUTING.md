@@ -46,6 +46,25 @@ gosec (HIGH), govulncheck, CodeQL, and a licence check that blocks GPL, AGPL,
 LGPL and SSPL dependencies. The Go tools are pinned in the separate `tools/`
 module so they never become dependencies of imgowner itself.
 
+## Working on the dashboard
+
+The dashboard's source is in `web/dashboard` (React + uPlot, built with Vite);
+its compiled output is committed to `internal/dashboard/dist` and embedded in
+the Go binary, so `go install` users get it without Node. After changing the
+source:
+
+```bash
+cd web/dashboard
+npm ci --ignore-scripts
+npm run typecheck && npm run build
+```
+
+and commit the regenerated `internal/dashboard/dist`. CI rebuilds it from
+source and fails if a single byte differs, so build on Linux (or in a `node:24`
+container) and never edit `dist` by hand. Dependabot bumps to the dashboard's
+npm packages need the same rebuild. The dashboard is limited to five direct
+runtime dependencies, all pinned to exact versions.
+
 ## Making a change
 
 1. Create a branch from `staging`: `feature/short-description`,

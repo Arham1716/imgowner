@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -30,6 +31,7 @@ import (
 	"time"
 
 	"github.com/Arham1716/imgowner/internal/attribution"
+	"github.com/Arham1716/imgowner/internal/history"
 	"github.com/Arham1716/imgowner/internal/pins"
 )
 
@@ -145,7 +147,12 @@ func testFixture(t *testing.T, f fixtureSpec) {
 
 	// FR-47: run the real binary (built in TestMain) and real Trivy against
 	// the image this test just pushed.
-	out := runImgowner(t, "attribute", "--image", ref, "--dockerfile", dfPath,
+	// Each fixture gets its own history directory (via --config) so the
+	// FR-31 assertions below see exactly the records this test produced.
+	histDir := t.TempDir()
+	cfgPath := writeHistoryConfig(t, histDir)
+
+	out := runImgowner(t, "--config", cfgPath, "attribute", "--image", ref, "--dockerfile", dfPath,
 		"--format", "json", "--base-candidates", "0")
 
 	var report struct {
@@ -157,11 +164,14 @@ func testFixture(t *testing.T, f fixtureSpec) {
 		t.Fatalf("parsing attribute JSON output: %v\nraw: %s", err, out)
 	}
 
-	assertDigestAndLayers(t, ref, report.Digest, report.Findings) // FR-48
-	assertAttribution(t, f, dfPath, report.Findings)              // FR-49
+	assertHistoryRecord(t, histDir, report.Digest, report.Findings) // FR-31
+	assertNoHistoryOnToolError(t, cfgPath, histDir, dfPath)         // FR-31: exit 2 records nothing
+	assertDigestAndLayers(t, ref, report.Digest, report.Findings)   // FR-48
+	assertAttribution(t, f, dfPath, report.Findings)                // FR-49
 
 	if f.pkgManager != "" {
-		assertPin(t, f, dfPath) // FR-50
+		assertPin(t, f, dfPath, cfgPath) // FR-50
+		assertPinsHistory(t, histDir)    // FR-31
 	}
 }
 
@@ -549,9 +559,9 @@ func equalStrings(a, b []string) bool {
 
 // ── pin status check (FR-50) ─────────────────────────────────────────────────
 
-func assertPin(t *testing.T, f fixtureSpec, dfPath string) {
+func assertPin(t *testing.T, f fixtureSpec, dfPath, cfgPath string) {
 	t.Helper()
-	out := runImgowner(t, "pins", "check", "--dockerfile", dfPath, "--format", "json")
+	out := runImgowner(t, "--config", cfgPath, "pins", "check", "--dockerfile", dfPath, "--format", "json")
 
 	var pinList []pins.Pin
 	if err := json.Unmarshal(out, &pinList); err != nil {
@@ -587,5 +597,98 @@ func assertPin(t *testing.T, f fixtureSpec, dfPath string) {
 
 	if found.Status == pins.StatusUnknown {
 		t.Errorf("pin status is %q; a real package index lookup against a live base image should resolve a real status", found.Status)
+	}
+}
+
+// ── scan history (FR-31) ─────────────────────────────────────────────────────
+
+func writeHistoryConfig(t *testing.T, histDir string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), ".imgowner.yaml")
+	// Single-quoted YAML scalar: no escape processing, so a Windows path with
+	// backslashes survives when the suite is run locally.
+	cfg := "history:\n  dir: '" + strings.ReplaceAll(histDir, "'", "''") + "'\n"
+	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+	return path
+}
+
+func listHistory(t *testing.T, dir string) []history.Summary {
+	t.Helper()
+	store, err := history.Open(dir)
+	if err != nil {
+		t.Fatalf("opening history store: %v", err)
+	}
+	sums, skipped, err := store.List()
+	if err != nil || skipped != 0 {
+		t.Fatalf("listing history: skipped=%d err=%v", skipped, err)
+	}
+	return sums
+}
+
+// A successful attribute run leaves exactly one record whose digest and
+// per-owner counts match what the run itself reported.
+func assertHistoryRecord(t *testing.T, dir, reportedDigest string, findings []attribution.Finding) {
+	t.Helper()
+	sums := listHistory(t, dir)
+	if len(sums) != 1 {
+		t.Fatalf("expected exactly 1 history record after one attribute run, got %d", len(sums))
+	}
+	s := sums[0]
+	if s.Command != "attribute" || s.Digest != reportedDigest {
+		t.Errorf("record = %s/%s, want attribute/%s", s.Command, s.Digest, reportedDigest)
+	}
+	want := map[string]int{}
+	for _, f := range findings {
+		want[string(f.Owner)]++
+	}
+	for owner, n := range want {
+		if s.Counts[owner] != n {
+			t.Errorf("history counts[%s] = %d, the run reported %d", owner, s.Counts[owner], n)
+		}
+	}
+	total := 0
+	for _, n := range s.Counts {
+		total += n
+	}
+	if total != len(findings) {
+		t.Errorf("history counts sum to %d, the run reported %d findings", total, len(findings))
+	}
+}
+
+// A run that exits 2 (here: an image that doesn't exist) writes no record.
+func assertNoHistoryOnToolError(t *testing.T, cfgPath, histDir, dfPath string) {
+	t.Helper()
+	before := len(listHistory(t, histDir))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, imgownerBin, "--config", cfgPath, "attribute",
+		"--image", registryAddr()+"/imgowner-fixtures/does-not-exist:nope",
+		"--dockerfile", dfPath, "--format", "json", "--base-candidates", "0")
+	err := cmd.Run()
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != 2 {
+		t.Fatalf("attribute on a missing image should exit 2, got %v", err)
+	}
+	if after := len(listHistory(t, histDir)); after != before {
+		t.Errorf("a failed run must not record history: %d records before, %d after", before, after)
+	}
+}
+
+// After the attribute run and the pins check, the store holds both.
+func assertPinsHistory(t *testing.T, dir string) {
+	t.Helper()
+	var sawPins bool
+	for _, s := range listHistory(t, dir) {
+		if s.Command == "pins-check" {
+			sawPins = true
+			if len(s.PinStatuses) == 0 {
+				t.Errorf("the pins-check record carries no pin statuses: %+v", s)
+			}
+		}
+	}
+	if !sawPins {
+		t.Error("pins check ran but left no pins-check history record")
 	}
 }

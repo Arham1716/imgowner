@@ -142,6 +142,53 @@ pins:
 base image will not fail your build, because you cannot fix it without changing
 the base.
 
+## Scan history
+
+Every successful `attribute`, `ci` and `pins check` run is recorded in a small
+history store on your own machine, which the local dashboard reads. Nothing
+is ever sent anywhere, and no registry credentials or tokens are stored.
+
+| Platform | Location |
+|---|---|
+| Linux | `$XDG_STATE_HOME/imgowner/history` (default `~/.local/state/imgowner/history`) |
+| macOS | `~/Library/Application Support/imgowner/history` |
+| Windows | `%LOCALAPPDATA%\imgowner\history` |
+
+Records are one JSON file per scan, readable only by you, and records older
+than `history.retention_days` (default 90) are deleted each time a new one is
+written. A failure to write history is a warning on stderr and never changes
+a scan's exit code.
+
+```yaml
+history:
+  enabled: true        # set false to record nothing (e.g. in CI)
+  retention_days: 90   # must be at least 1
+  dir: ""            # override the location above
+```
+
+## Dashboard
+
+```sh
+imgowner dashboard
+```
+
+Opens a read-only dashboard over your scan history in your browser: findings
+per owner over time, a filterable findings table (with the Dockerfile line each
+CVE is attributed to), the status of your pinned packages, and base image
+recommendations. It needs no Trivy, Docker or network; it only reads the
+history described above.
+
+- It listens on `127.0.0.1` only and refuses any request whose `Host` is not
+  `127.0.0.1`/`localhost` on its own port (DNS-rebinding defence).
+- The URL it prints carries a one-time token that your browser swaps for a
+  session cookie; the token is then dead. Reloading works; to open a second
+  browser, restart the command.
+- It is read-only: anything but `GET` is answered with `405`.
+- The page loads nothing from outside your machine (strict Content-Security-Policy).
+
+`--no-open` prints the URL without launching a browser; `--port N` picks a
+port instead of a free one.
+
 ## How it works
 
 1. The image reference is resolved to a digest and scanned with Trivy.
