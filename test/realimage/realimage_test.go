@@ -248,7 +248,11 @@ func resolveDnfCandidate(t *testing.T, baseRef string) string {
 
 func dockerRunCapture(t *testing.T, imageRef, script string) string {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	// 5 minutes, matching pins.lookup_timeout's own default (NFR-09): this
+	// covers both the image pull and the query, and a cold pull of a large
+	// base image like rockylinux can by itself take a couple of minutes on a
+	// loaded CI runner. A real hang is still caught; this isn't unbounded.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "--entrypoint", "sh", imageRef, "-c", script)
 	var stdout, stderr bytes.Buffer
