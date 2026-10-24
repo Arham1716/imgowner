@@ -19,8 +19,19 @@ import (
 	"github.com/Arham1716/imgowner/internal/pins"
 	"github.com/Arham1716/imgowner/internal/pipeline"
 	"github.com/Arham1716/imgowner/internal/report"
+	"github.com/Arham1716/imgowner/internal/safeio"
 	"github.com/Arham1716/imgowner/internal/scan"
 	"github.com/Arham1716/imgowner/internal/scm"
+)
+
+// version, commit and date are set via -ldflags at build time (see
+// .goreleaser.yml); they stay "dev"/"none"/"unknown" for a local `go build`.
+// A signed release's SBOM and cosign signature cover these exact values, so
+// `imgowner version` is how a user confirms which build they actually have.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
 )
 
 // exitError carries a specific OS exit code through cobra's error path.
@@ -71,6 +82,8 @@ func rootCmd(ctx context.Context) *cobra.Command {
 		SilenceErrors: true,
 	}
 	root.PersistentFlags().StringVar(&cfgPath, "config", ".imgowner.yaml", "config file path")
+	root.Version = fmt.Sprintf("%s (commit %s, built %s)", version, commit, date)
+	root.SetVersionTemplate("imgowner {{.Version}}\n")
 
 	root.AddCommand(
 		attributeCmd(ctx, &cfgPath),
@@ -171,6 +184,7 @@ func attributeCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 			// Write reports (FR-21, FR-22, FR-23).
 			if err := report.Write(report.Request{
 				Image:      imageRef,
+				Digest:     res.Digest,
 				BaseRef:    res.BaseRef,
 				Findings:   res.Findings,
 				Candidates: res.Candidates,
@@ -225,7 +239,7 @@ func pinsCheckCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 			}
 
 			// Parse Dockerfile and extract pinned packages (Story 2.1, FR-12).
-			dfContent, err := os.ReadFile(dockerfilePath)
+			dfContent, err := safeio.ReadFile(dockerfilePath, safeio.MaxDockerfile)
 			if err != nil {
 				return writeStructuredError(map[string]string{"error": err.Error()})
 			}
@@ -387,7 +401,7 @@ func pinsUpdateCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 				return writeStructuredError(structuredScanErr(err))
 			}
 
-			dfContent, err := os.ReadFile(dockerfilePath)
+			dfContent, err := safeio.ReadFile(dockerfilePath, safeio.MaxDockerfile)
 			if err != nil {
 				return writeStructuredError(map[string]string{"error": err.Error()})
 			}
@@ -466,7 +480,7 @@ func buildPinsPRBody(pinList []pins.Pin) string {
 	sb.WriteString("| Package | Old | New | Status |\n|---|---|---|---|\n")
 	for _, p := range pinList {
 		if p.Status == pins.StatusUpdateAvailable || p.Status == pins.StatusFixesCVEs {
-			sb.WriteString(fmt.Sprintf("| %s | %s | %s | %s |\n", p.Package, p.Version, p.Available, p.Status))
+			fmt.Fprintf(&sb, "| %s | %s | %s | %s |\n", p.Package, p.Version, p.Available, p.Status)
 		}
 	}
 	return sb.String()
@@ -567,6 +581,7 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 			}
 			if err := report.Write(report.Request{
 				Image:      imageRef,
+				Digest:     res.Digest,
 				BaseRef:    baseRef,
 				Findings:   findings,
 				Candidates: candidates,
@@ -584,6 +599,7 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 					var commentBuf strings.Builder
 					_ = report.WriteToWriter(&commentBuf, report.Request{
 						Image:      imageRef,
+						Digest:     res.Digest,
 						BaseRef:    baseRef,
 						Findings:   findings,
 						Candidates: candidates,

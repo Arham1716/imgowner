@@ -71,3 +71,16 @@ func TestSortEditsDesc(t *testing.T) {
 		t.Errorf("unexpected order: %v", edits)
 	}
 }
+
+// Overlapping edits would write the second replacement over bytes the first
+// one already changed, producing a corrupted Dockerfile in the PR.
+func TestApplyEdits_OverlapRejected(t *testing.T) {
+	content := []byte("RUN apt-get install -y curl=7.88.1-10\n")
+	edits := []Edit{
+		{ByteOffset: 28, OldVersion: "7.88.1-10", NewVersion: "7.88.1-12"},
+		{ByteOffset: 30, OldVersion: "88.1-10", NewVersion: "99"},
+	}
+	if _, err := ApplyEdits(content, edits); err == nil {
+		t.Error("expected an error for overlapping edits, got nil")
+	}
+}

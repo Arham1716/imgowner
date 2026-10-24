@@ -3,7 +3,22 @@ version: "2"
 linters:
   default: standard
   enable:
+    - depguard
     - errcheck
     - govet
     - staticcheck
     - unused
+  settings:
+    depguard:
+      rules:
+        # Product code must never depend on project infrastructure
+        # (requirements §3.1, NFR-18). Test code may.
+        product-is-not-infrastructure:
+          files:
+            - "$all"
+            - "!$test"
+          deny:
+            - pkg: github.com/Arham1716/imgowner/test
+              desc: test/ is project infrastructure and must not be imported by shipped code
+            - pkg: github.com/Arham1716/imgowner/tools
+              desc: tools/ holds CI gate tooling and must not be imported by shipped code

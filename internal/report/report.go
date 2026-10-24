@@ -17,6 +17,7 @@ import (
 // Request bundles everything needed to write a report.
 type Request struct {
 	Image      string
+	Digest     string // digest actually scanned (pipeline.AttributeResult.Digest); empty if unresolved
 	BaseRef    string
 	Findings   []attribution.Finding
 	Candidates []baserec.Candidate
@@ -109,8 +110,13 @@ func renderMarkdown(w io.Writer, req Request) error {
 	ew := &errWriter{w: w}
 
 	ew.printf("# imgowner report\n\n")
-	ew.printf("**Image:** `%s`  \n**Base:** `%s`  \n**Generated:** %s\n\n",
-		req.Image, req.BaseRef, time.Now().UTC().Format(time.RFC3339))
+	if req.Digest != "" {
+		ew.printf("**Image:** `%s` (`%s`)  \n**Base:** `%s`  \n**Generated:** %s\n\n",
+			req.Image, req.Digest, req.BaseRef, time.Now().UTC().Format(time.RFC3339))
+	} else {
+		ew.printf("**Image:** `%s`  \n**Base:** `%s`  \n**Generated:** %s\n\n",
+			req.Image, req.BaseRef, time.Now().UTC().Format(time.RFC3339))
+	}
 
 	ew.printf("## CVE attribution\n\n")
 	ew.printf("| Owner | Count |\n|---|---|\n")
@@ -168,6 +174,7 @@ func renderMarkdown(w io.Writer, req Request) error {
 type jsonReport struct {
 	GeneratedAt string                `json:"generated_at"`
 	Image       string                `json:"image"`
+	Digest      string                `json:"digest,omitempty"`
 	BaseRef     string                `json:"base_ref"`
 	Findings    []attribution.Finding `json:"findings"`
 	Candidates  []baserec.Candidate   `json:"base_candidates,omitempty"`
@@ -180,6 +187,7 @@ func renderJSON(w io.Writer, req Request) error {
 	return enc.Encode(jsonReport{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		Image:       req.Image,
+		Digest:      req.Digest,
 		BaseRef:     req.BaseRef,
 		Findings:    req.Findings,
 		Candidates:  req.Candidates,

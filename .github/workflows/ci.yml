@@ -1,40 +1,66 @@
 name: CI
 
+# Every change lands on staging first; staging is promoted to main by a PR
+# the owner merges (FR-39, FR-40). Both branches run the full suite.
 on:
   push:
-    branches: [main]
+    branches: [main, staging]
   pull_request:
-    branches: [main]
+    branches: [main, staging]
 
+# Least privilege by default (NFR-14); no job here needs to write anything.
 permissions:
   contents: read
 
 # GOTOOLCHAIN defaults to "auto", which silently downloads a newer Go
-# toolchain when go.mod's "go" directive requires one. That let a dependency
-# bump requiring Go 1.26 pass "go build" here while the project is deliberately
-# pinned to Go 1.23 for toolchain compatibility (see go.mod) -- the mismatch
-# only surfaced because the Lint job's golangci-lint binary couldn't do the
-# same silent upgrade. Pinning GOTOOLCHAIN=local makes an incompatible bump
-# fail the build directly, instead of only being caught as a side effect.
+# toolchain when go.mod's "go" directive requires one, so a dependency bump
+# could quietly change the compiler every release is built with. Pinning
+# GOTOOLCHAIN=local makes that fail the build instead, and GO_VERSION below is
+# the one toolchain everything is built, tested and released with.
 env:
   GOTOOLCHAIN: local
+  GO_VERSION: '1.26.10'
+  NODE_VERSION: '24'
 
 jobs:
+  # A PR into main must come from staging and nowhere else (FR-39/FR-40).
+  # It passes trivially for PRs into staging so it can be a required check on
+  # both branches.
+  promotion-guard:
+    name: Promotion guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Only staging may be promoted to main
+        if: github.event_name == 'pull_request' && github.base_ref == 'main'
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          THIS_REPO: ${{ github.repository }}
+        run: |
+          if [ "$HEAD_REF" != "staging" ] || [ "$HEAD_REPO" != "$THIS_REPO" ]; then
+            echo "::error::PRs into main must come from $THIS_REPO:staging (got $HEAD_REPO:$HEAD_REF). Target staging instead."
+            exit 1
+          fi
+      - run: echo "ok"
+
   test:
     name: Build and test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          go-version: '1.23'
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
           cache: true
 
       - name: Verify go.mod is tidy
         run: |
           go mod tidy
           git diff --exit-code go.mod go.sum
+          (cd tools && go mod tidy && git diff --exit-code go.mod go.sum)
 
       - name: Vet
         run: go vet ./...
@@ -64,17 +90,21 @@ jobs:
     # access to the pull credentials and would hit anonymous rate limits.
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          go-version: '1.23'
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
           cache: true
 
       - name: Install Trivy
         run: |
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-            | sh -s -- -b /usr/local/bin v0.76.0
+          .github/scripts/fetch-verified.sh \
+            https://github.com/aquasecurity/trivy/releases/download/v0.76.0/trivy_0.76.0_Linux-64bit.tar.gz \
+            e24b1c51293c1b15e4ba8d45bbc7891ba053f90278ec2698f3562c993e145fe7 \
+            trivy /usr/local/bin
           trivy --version
 
       - name: Run e2e tests
@@ -87,21 +117,29 @@ jobs:
       run:
         working-directory: editors/vscode
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: '20'
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: editors/vscode/package-lock.json
 
+      # --ignore-scripts: no dependency gets to run code at install time (NFR-15).
       - name: Install
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       # Dev-only dependencies, but the extension ships from a security tool's
       # repo; a HIGH advisory in its own toolchain should not go unnoticed.
+      # Fails on any HIGH/CRITICAL advisory unless it's a reviewed, written
+      # exception in .github/audit-exceptions.json (NFR-44) -- a bare
+      # `npm audit` would otherwise block every PR the next time any
+      # transitive dev dependency gets a new advisory with no fix out yet.
       - name: Audit
-        run: npm audit --audit-level=high
+        working-directory: ${{ github.workspace }} # escape the job's editors/vscode default; the script takes a repo-relative path
+        run: node .github/scripts/check-npm-audit.mjs editors/vscode
 
       # @types/vscode is pinned to the engines.vscode floor, so this fails if
       # the code uses any API newer than the oldest VS Code it claims to support.
@@ -115,18 +153,144 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          go-version: '1.23'
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
           cache: true
 
-      # .golangci.yml uses the v2 config schema; golangci-lint-action@v6 only
-      # knows how to install and run v1.x binaries, which fail to parse it
-      # (confirmed: the step failed in ~13s on every open PR, too fast to
-      # have actually linted anything). v9 supports v2 binaries directly.
-      - uses: golangci/golangci-lint-action@v9
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: v2.1.6
+          version: v2.15.0
           args: --timeout=5m
+
+  # FR-44 / FR-45: any finding here blocks the merge. Every tool is pinned:
+  # Go tools through the separate tools/ module (so none of them enter the
+  # product's go.mod or SBOM), gitleaks by release checksum.
+  security:
+    name: Security gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # gitleaks scans the full history, not just this diff
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            tools/go.sum
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Build gate tools
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          cd tools
+          go build -o "$RUNNER_TEMP/bin/" \
+            github.com/securego/gosec/v2/cmd/gosec \
+            golang.org/x/vuln/cmd/govulncheck \
+            github.com/google/go-licenses/v2
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Install gitleaks
+        run: |
+          .github/scripts/fetch-verified.sh \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
+            551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb \
+            gitleaks "$RUNNER_TEMP/bin"
+
+      - name: Secrets (gitleaks, full history)
+        run: gitleaks git . --redact --no-banner --exit-code 1
+
+      - name: SAST (gosec, HIGH)
+        run: gosec -quiet -severity high -confidence medium -exclude-dir=tools ./...
+
+      - name: Vulnerable dependencies (govulncheck)
+        run: govulncheck ./...
+
+      - name: Go licences
+        run: go-licenses check ./... --disallowed_types=forbidden,restricted,unknown
+
+      - name: npm licences
+        run: node .github/scripts/check-npm-licenses.mjs editors/vscode/package-lock.json
+
+  # FR-47..FR-50: builds and pushes 4 real fixture images to a throwaway,
+  # job-local registry, then runs the real built binary and real Trivy
+  # against each, cross-checking digests and layer DiffIDs against values
+  # computed independently by the registry and the container runtime.
+  realimage:
+    name: Real-image suite
+    runs-on: ubuntu-latest
+    services:
+      registry:
+        image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+        ports:
+          - 5000:5000
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install Trivy
+        run: |
+          .github/scripts/fetch-verified.sh \
+            https://github.com/aquasecurity/trivy/releases/download/v0.76.0/trivy_0.76.0_Linux-64bit.tar.gz \
+            e24b1c51293c1b15e4ba8d45bbc7891ba053f90278ec2698f3562c993e145fe7 \
+            trivy /usr/local/bin
+
+      - name: Run real-image suite
+        env:
+          REALIMAGE_REGISTRY: localhost:5000
+        run: go test -tags realimage -timeout 25m ./test/realimage/...
+
+  # FR-46: every parser of untrusted input is fuzzed on every PR. A crash
+  # fails the job and the crashing input is kept as an artifact.
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { pkg: ./internal/dockerfile, target: FuzzParseBytes }
+          - { pkg: ./internal/pins, target: FuzzExtract }
+          - { pkg: ./internal/pins, target: FuzzParseLookupOutput }
+          - { pkg: ./internal/pins, target: FuzzApplyEdits }
+          - { pkg: ./internal/attribution, target: FuzzAttribute }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Fuzz for 30s
+        env:
+          PKG: ${{ matrix.pkg }}
+          TARGET: ${{ matrix.target }}
+        run: go test "$PKG" -run='^$' -fuzz="^${TARGET}\$" -fuzztime=30s
+
+      - name: Keep crashing input
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: '**/testdata/fuzz/${{ matrix.target }}/**'
+          if-no-files-found: ignore

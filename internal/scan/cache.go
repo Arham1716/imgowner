@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/Arham1716/imgowner/internal/safeio"
 )
 
 const cacheSchemaVersion = "1"
@@ -42,7 +44,7 @@ func ReadCache(digest, trivyVersion string) ([]byte, error) {
 	}
 	path := filepath.Join(dir, cacheKey(digest, trivyVersion))
 
-	data, err := os.ReadFile(path)
+	data, err := safeio.ReadFile(path, safeio.MaxTrivyReport)
 	if os.IsNotExist(err) {
 		return nil, nil
 	}

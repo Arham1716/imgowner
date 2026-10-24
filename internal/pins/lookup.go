@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/Arham1716/imgowner/internal/safeio"
 )
 
 const lookupTimeout = 5 * time.Minute
@@ -33,7 +35,7 @@ func LookupVersions(ctx context.Context, rt Runtime, imageRef string, pins []Pin
 	}
 
 	cmd := rt.Run(ctx, "run", "--rm", "--entrypoint", "sh", imageRef, "-c", script)
-	out, err := cmd.Output()
+	out, err := safeio.Output(cmd, safeio.MaxLookupOutput, "pin lookup output")
 	if err != nil {
 		// Non-fatal (design F16 DEFER path): every pin becomes unknown, but the
 		// caller gets the reason so it can be reported instead of leaving the
@@ -77,9 +79,9 @@ func runFailureDetail(err error) string {
 
 // buildLookupScript produces a shell script that outputs one line per package:
 //
-//	CURRENT:<pkg>:<pinned>:<latest>
-//	UPDATE:<pkg>:<pinned>:<latest>
-//	UNAVAILABLE:<pkg>
+//	CURRENT|<pkg>|<pinned>|<latest>
+//	UPDATE|<pkg>|<pinned>|<latest>
+//	UNAVAILABLE|<pkg>
 //
 // FR-15: batched into a single container run per stage.
 func buildLookupScript(mgr string, pins []Pin) (string, error) {
@@ -94,9 +96,9 @@ func buildLookupScript(mgr string, pins []Pin) (string, error) {
 			pin := sanitizeVersion(p.Version)
 			fmt.Fprintf(&b,
 				`LATEST=$(apt-cache madison %s 2>/dev/null | awk -F'|' 'NR==1{gsub(/ /,"",$2);print $2}'); `+
-					`if [ -z "$LATEST" ]; then echo "UNAVAILABLE:%s"; `+
-					`elif dpkg --compare-versions "$LATEST" gt "%s" 2>/dev/null; then echo "UPDATE:%s:%s:$LATEST"; `+
-					`else echo "CURRENT:%s:%s:$LATEST"; fi; `,
+					`if [ -z "$LATEST" ]; then echo "UNAVAILABLE|%s"; `+
+					`elif dpkg --compare-versions "$LATEST" gt "%s" 2>/dev/null; then echo "UPDATE|%s|%s|$LATEST"; `+
+					`else echo "CURRENT|%s|%s|$LATEST"; fi; `,
 				pkg, pkg, pin, pkg, pin, pkg, pin,
 			)
 		}
@@ -109,9 +111,9 @@ func buildLookupScript(mgr string, pins []Pin) (string, error) {
 			// apk search returns "pkgname-version"; strip the prefix to get version.
 			fmt.Fprintf(&b,
 				`LATEST=$(apk search -q "^%s" 2>/dev/null | grep "^%s-[0-9]" | sort -V | tail -1 | sed "s/^%s-//"); `+
-					`if [ -z "$LATEST" ]; then echo "UNAVAILABLE:%s"; `+
-					`elif apk version -t "$LATEST" "%s" 2>/dev/null | grep -q ">"; then echo "UPDATE:%s:%s:$LATEST"; `+
-					`else echo "CURRENT:%s:%s:$LATEST"; fi; `,
+					`if [ -z "$LATEST" ]; then echo "UNAVAILABLE|%s"; `+
+					`elif apk version -t "$LATEST" "%s" 2>/dev/null | grep -q ">"; then echo "UPDATE|%s|%s|$LATEST"; `+
+					`else echo "CURRENT|%s|%s|$LATEST"; fi; `,
 				pkg, pkg, pkg, pkg, pin, pkg, pin, pkg, pin,
 			)
 		}
@@ -127,9 +129,9 @@ func buildLookupScript(mgr string, pins []Pin) (string, error) {
 			// take the newest version column for this exact package name.
 			fmt.Fprintf(&b,
 				`LATEST=$($PM -q list available %s 2>/dev/null | awk '$1 ~ /^%s\./ {print $2}' | sort -V | tail -1); `+
-					`if [ -z "$LATEST" ]; then echo "UNAVAILABLE:%s"; `+
-					`elif [ "$LATEST" != "%s" ]; then echo "UPDATE:%s:%s:$LATEST"; `+
-					`else echo "CURRENT:%s:%s:$LATEST"; fi; `,
+					`if [ -z "$LATEST" ]; then echo "UNAVAILABLE|%s"; `+
+					`elif [ "$LATEST" != "%s" ]; then echo "UPDATE|%s|%s|$LATEST"; `+
+					`else echo "CURRENT|%s|%s|$LATEST"; fi; `,
 				pkg, pkg, pkg, pin, pkg, pin, pkg, pin,
 			)
 		}
@@ -150,7 +152,9 @@ func parseLookupOutput(out []byte, pins []Pin) []Pin {
 	}
 
 	for _, line := range bytes.Split(bytes.TrimSpace(out), []byte("\n")) {
-		parts := strings.SplitN(string(line), ":", 4)
+		// '|' delimits fields because it can't occur in a package name or
+		// version, whereas ':' can (Debian epochs such as "1:2024b-0").
+		parts := strings.SplitN(string(line), "|", 4)
 		if len(parts) < 2 {
 			continue
 		}
@@ -163,16 +167,22 @@ func parseLookupOutput(out []byte, pins []Pin) []Pin {
 		switch kind {
 		case "UNAVAILABLE":
 			p.Status = StatusUnavailable
-		case "CURRENT":
-			if len(parts) == 4 {
-				p.Available = parts[3]
+		case "CURRENT", "UPDATE":
+			// The version comes from a container built on an image we don't
+			// control, and PlanEdits/ApplyEdits write it verbatim into the
+			// Dockerfile of an auto-opened PR. Anything that isn't a plain
+			// version string (shell metacharacters, whitespace, newlines) could
+			// inject instructions into that Dockerfile, so it is rejected and
+			// the pin stays unknown rather than trusting it.
+			if len(parts) != 4 || !isPlainVersion(parts[3]) {
+				continue
 			}
-			p.Status = StatusCurrent
-		case "UPDATE":
-			if len(parts) == 4 {
-				p.Available = parts[3]
+			p.Available = parts[3]
+			if kind == "CURRENT" {
+				p.Status = StatusCurrent
+			} else {
+				p.Status = StatusUpdateAvailable
 			}
-			p.Status = StatusUpdateAvailable
 		}
 	}
 
@@ -192,12 +202,24 @@ func sanitizeIdentifier(s string) string {
 	return b.String()
 }
 
-// sanitizeVersion allows only characters valid in Debian/Alpine version strings.
+// isPlainVersion reports whether s is non-empty and made only of characters
+// valid in a Debian/Alpine/RPM version string.
+func isPlainVersion(s string) bool {
+	return s != "" && len(s) <= 256 && sanitizeVersion(s) == s
+}
+
+// sanitizeVersion allows only characters valid in Debian/Alpine/RPM version
+// strings. RPM release tags commonly carry an underscore-separated erratum
+// suffix (e.g. "1.21.1-11.el9_8", "7.76.1-26.el9_3.2.0.1" on Rocky/RHEL), so
+// '_' must be included: without it, a real pinned version silently fails
+// isPlainVersion and every such pin is reported unknown instead of its real
+// status -- found via the real-image suite's Rocky fixture, where every
+// current Rocky release carries exactly this suffix.
 func sanitizeVersion(s string) string {
 	var b strings.Builder
 	for _, r := range s {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
-			(r >= '0' && r <= '9') || r == '.' || r == '-' || r == '+' || r == ':' || r == '~' {
+			(r >= '0' && r <= '9') || r == '.' || r == '-' || r == '+' || r == ':' || r == '~' || r == '_' {
 			b.WriteRune(r)
 		}
 	}

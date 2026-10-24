@@ -1,0 +1,14 @@
+{
+  "npm": {
+    "@vscode/vsce-sign": "Microsoft licence terms; dev-only dependency of @vscode/vsce used to package the VSIX, never bundled into it",
+    "@vscode/vsce-sign-alpine-arm64": "platform binary of @vscode/vsce-sign; same reason",
+    "@vscode/vsce-sign-alpine-x64": "platform binary of @vscode/vsce-sign; same reason",
+    "@vscode/vsce-sign-darwin-arm64": "platform binary of @vscode/vsce-sign; same reason",
+    "@vscode/vsce-sign-darwin-x64": "platform binary of @vscode/vsce-sign; same reason",
+    "@vscode/vsce-sign-linux-arm": "platform binary of @vscode/vsce-sign; same reason",
+    "@vscode/vsce-sign-linux-arm64": "platform binary of @vscode/vsce-sign; same reason",
+    "@vscode/vsce-sign-linux-x64": "platform binary of @vscode/vsce-sign; same reason",
+    "@vscode/vsce-sign-win32-arm64": "platform binary of @vscode/vsce-sign; same reason",
+    "@vscode/vsce-sign-win32-x64": "platform binary of @vscode/vsce-sign; same reason"
+  }
+}

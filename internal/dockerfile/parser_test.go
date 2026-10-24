@@ -144,6 +144,79 @@ FROM debian:${BASE_TAG}
 	}
 }
 
+// The most common multi-stage pattern there is: a later stage builds FROM an
+// earlier stage's name, not an external image. Found via the VS Code
+// extension misreporting examples/Dockerfile.example's 228 findings as
+// unattributed -- ResolveBaseRef handed "base" straight to the registry
+// resolver, which tried (and failed) to pull docker.io/library/base.
+func TestResolveBaseRef_FollowsStageNameChain(t *testing.T) {
+	src := `FROM python:3.12-slim AS base
+RUN apt-get install -y curl
+FROM base AS app
+COPY . .
+`
+	f, err := ParseBytes([]byte(src))
+	if err != nil {
+		t.Fatalf("ParseBytes: %v", err)
+	}
+	final := f.FinalStage()
+	if final == nil || final.Name != "app" {
+		t.Fatalf("expected final stage 'app', got %+v", final)
+	}
+
+	got := f.ResolveBaseRef(final)
+	if got != "python:3.12-slim" {
+		t.Errorf("ResolveBaseRef(app) = %q, want %q (the external image, not the stage name 'base')", got, "python:3.12-slim")
+	}
+}
+
+// Chains of more than two stages must resolve all the way through, not just
+// one hop.
+func TestResolveBaseRef_FollowsMultiHopStageChain(t *testing.T) {
+	src := `FROM golang:1.23 AS deps
+FROM deps AS builder
+FROM builder AS final
+`
+	f, err := ParseBytes([]byte(src))
+	if err != nil {
+		t.Fatalf("ParseBytes: %v", err)
+	}
+	got := f.ResolveBaseRef(f.FinalStage())
+	if got != "golang:1.23" {
+		t.Errorf("ResolveBaseRef(final) = %q, want %q", got, "golang:1.23")
+	}
+}
+
+// An ARG-based external image combined with a stage-name chain: the ARG must
+// be substituted at each hop, not just the first.
+func TestResolveBaseRef_StageChainWithARG(t *testing.T) {
+	src := `ARG BASE_TAG=12-slim
+FROM debian:${BASE_TAG} AS base
+FROM base AS final
+`
+	f, err := ParseBytes([]byte(src))
+	if err != nil {
+		t.Fatalf("ParseBytes: %v", err)
+	}
+	got := f.ResolveBaseRef(f.FinalStage())
+	if got != "debian:12-slim" {
+		t.Errorf("ResolveBaseRef(final) = %q, want %q", got, "debian:12-slim")
+	}
+}
+
+// A single-stage Dockerfile must be unaffected: nothing to chase, same
+// behaviour as before this fix.
+func TestResolveBaseRef_NoStageChainIsUnaffected(t *testing.T) {
+	f, err := ParseBytes([]byte("FROM debian:12-slim\n"))
+	if err != nil {
+		t.Fatalf("ParseBytes: %v", err)
+	}
+	got := f.ResolveBaseRef(f.FinalStage())
+	if got != "debian:12-slim" {
+		t.Errorf("ResolveBaseRef = %q, want %q", got, "debian:12-slim")
+	}
+}
+
 func TestParseARG(t *testing.T) {
 	cases := []struct {
 		in         string

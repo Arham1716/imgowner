@@ -1,0 +1,10 @@
+# Reviewed false positives. Each line is a gitleaks fingerprint
+# (commit:file:rule:line).
+#
+# phase0/python.json is a recorded Trivy report of the official python image.
+# Lines 59 and 109 are that image's own published GPG_KEY fingerprint and
+# PYTHON_SHA256 checksum: public build metadata, not credentials.
+6409291e021780816eaeb0c776340bc2964c4a26:phase0/python.json:generic-api-key:59
+6409291e021780816eaeb0c776340bc2964c4a26:phase0/python.json:generic-api-key:109
+8146a6080426d7e337774f842566e21a883727a8:phase0/python.json:generic-api-key:59
+8146a6080426d7e337774f842566e21a883727a8:phase0/python.json:generic-api-key:109

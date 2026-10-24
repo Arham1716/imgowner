@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"github.com/Arham1716/imgowner/internal/safeio"
 )
 
 // trivyVersion holds the parsed Trivy version output.
@@ -17,7 +19,7 @@ type trivyVersion struct {
 // requirement. Returns a structured error suitable for JSON marshalling (FR-30).
 func CheckTrivyVersion(ctx context.Context, minVersion string) error {
 	cmd := exec.CommandContext(ctx, "trivy", "version", "--format", "json")
-	out, err := cmd.Output()
+	out, err := safeio.Output(cmd, safeio.MaxToolOutput, "trivy version output")
 	if err != nil {
 		return &ErrToolMissing{
 			Tool: "trivy",
@@ -47,7 +49,7 @@ func CheckTrivyVersion(ctx context.Context, minVersion string) error {
 // InstalledVersion returns the version string reported by the installed Trivy binary.
 func InstalledVersion(ctx context.Context) (string, error) {
 	cmd := exec.CommandContext(ctx, "trivy", "version", "--format", "json")
-	out, err := cmd.Output()
+	out, err := safeio.Output(cmd, safeio.MaxToolOutput, "trivy version output")
 	if err != nil {
 		return "", &ErrToolMissing{Tool: "trivy", Hint: "trivy not found"}
 	}

@@ -17,6 +17,9 @@ faster.
 
 ## Development setup
 
+You need Go 1.26.8 or newer (go.mod sets the minimum; CI and releases build
+with 1.26.10).
+
 ```bash
 git clone https://github.com/Arham1716/imgowner.git
 cd imgowner
@@ -33,12 +36,23 @@ go test ./...                      # unit tests, no external dependencies
 go test -tags e2e ./internal/e2e/  # scans real images; needs trivy + network
 golangci-lint run                  # same linter config CI runs
 gofmt -l .                         # must print nothing
+
+# Fuzz a parser locally (CI fuzzes every target for 30s on each PR):
+go test ./internal/pins -run='^$' -fuzz='^FuzzExtract$' -fuzztime=30s
 ```
+
+CI also runs security gates on every PR: gitleaks over the full history,
+gosec (HIGH), govulncheck, CodeQL, and a licence check that blocks GPL, AGPL,
+LGPL and SSPL dependencies. The Go tools are pinned in the separate `tools/`
+module so they never become dependencies of imgowner itself.
 
 ## Making a change
 
-1. Create a branch: `feature/short-description`, `fix/short-description`, or
-   `hotfix/short-description`.
+1. Create a branch from `staging`: `feature/short-description`,
+   `fix/short-description`, or `hotfix/short-description`. Open the PR
+   against **`staging`**, not `main`. `main` only accepts the promotion PR
+   from `staging`, which the maintainer merges once staging is green; a PR
+   from any other branch into `main` fails the *Promotion guard* check.
 2. Write the code, then write or update tests for it. A PR that changes
    behavior without a test covering that behavior will be asked for one —
    this project has already found multiple real bugs this way, including two
