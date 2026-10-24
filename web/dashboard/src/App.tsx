@@ -1,18 +1,19 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactElement } from "react";
 import { ApiError, listScans } from "./api";
 import { BaseImages } from "./BaseImages";
 import { Findings } from "./Findings";
 import { fmtDate, sum } from "./format";
 import { Overview } from "./Overview";
+import { BrandMark, IconAuto, IconBase, IconFindings, IconMoon, IconOverview, IconPins, IconSun } from "./Icons";
 import { Pins } from "./Pins";
 import type { Summary } from "./types";
 
 type Tab = "overview" | "findings" | "pins" | "base";
-const TABS: { id: Tab; label: string }[] = [
-  { id: "overview", label: "Overview" },
-  { id: "findings", label: "Findings" },
-  { id: "pins", label: "Pins" },
-  { id: "base", label: "Base images" },
+const TABS: { id: Tab; label: string; blurb: string; icon: () => ReactElement }[] = [
+  { id: "overview", label: "Overview", blurb: "Who owns your CVEs, and how that is trending", icon: IconOverview },
+  { id: "findings", label: "Findings", blurb: "Every CVE in a scan, traced to its Dockerfile line", icon: IconFindings },
+  { id: "pins", label: "Pins", blurb: "Pinned OS packages against what is available", icon: IconPins },
+  { id: "base", label: "Base images", blurb: "Safer base image candidates for this image", icon: IconBase },
 ];
 const RANGES = [7, 30, 90] as const;
 type Theme = "auto" | "light" | "dark";
@@ -109,40 +110,46 @@ export function App() {
   }
 
   const hasAny = scans.length > 0;
+  const current = TABS.find((x) => x.id === tab) ?? TABS[0]!;
   return (
-    <div className="app">
-      <div className="top">
-        <div>
-          <h1>imgowner dashboard</h1>
-          <p className="sub">Your local scan history. Read-only; nothing leaves this machine.</p>
+    <div className="shell">
+      <aside className="side">
+        <div className="brand">
+          <BrandMark />
+          <div>
+            <b>imgowner</b>
+            <small>CVE ownership dashboard</small>
+          </div>
         </div>
-        <div className="seg" role="group" aria-label="Colour theme">
-          {(["auto", "light", "dark"] as const).map((t) => (
-            <button key={t} aria-pressed={theme === t} onClick={() => setTheme(t)}>
-              {t === "auto" ? "Auto" : t === "light" ? "Light" : "Dark"}
+        <nav className="nav" role="tablist" aria-label="Views" aria-orientation="vertical">
+          {TABS.map((x) => (
+            <button key={x.id} role="tab" aria-selected={tab === x.id} onClick={() => setTab(x.id)}>
+              <x.icon />
+              {x.label}
             </button>
           ))}
+        </nav>
+        <div className="side-foot">
+          <div className="badge-local">
+            <i /> Local and read-only
+          </div>
+          <div className="themeseg" role="group" aria-label="Colour theme">
+            {(["auto", "light", "dark"] as const).map((th) => (
+              <button key={th} aria-pressed={theme === th} aria-label={`${th} theme`} title={`${th} theme`} onClick={() => setTheme(th)}>
+                {th === "auto" ? <IconAuto /> : th === "light" ? <IconSun /> : <IconMoon />}
+              </button>
+            ))}
+          </div>
         </div>
-      </div>
+      </aside>
 
-      <div className="tabs" role="tablist" aria-label="Views">
-        {TABS.map((t) => (
-          <button key={t.id} role="tab" className="tab" aria-selected={tab === t.id} onClick={() => setTab(t.id)}>
-            {t.label}
-          </button>
-        ))}
-      </div>
-
-      {!hasAny ? (
-        <div className="card empty">
-          <p>No scans recorded yet.</p>
-          <p>
-            Run <span className="mono">imgowner attribute --image &lt;ref&gt; --dockerfile Dockerfile</span> and refresh this page.
-          </p>
-        </div>
-      ) : (
-        <>
-          {tab !== "pins" && (
+      <main className="main">
+        <div className="topbar">
+          <div className="titlebar">
+            <h1>{current.label}</h1>
+            <p className="sub">{current.blurb}</p>
+          </div>
+          {hasAny && tab !== "pins" && (
             <div className="filters">
               <label className="field">
                 Repository
@@ -159,7 +166,7 @@ export function App() {
                 <div className="seg" role="group" aria-label="Date range">
                   {RANGES.map((d) => (
                     <button key={d} aria-pressed={days === d} onClick={() => setDays(d)}>
-                      Last {d} days
+                      {d} days
                     </button>
                   ))}
                 </div>
@@ -178,15 +185,24 @@ export function App() {
               )}
             </div>
           )}
+        </div>
 
+        {!hasAny ? (
+          <div className="card empty">
+            <p>No scans recorded yet.</p>
+            <p>
+              Run <span className="mono">imgowner attribute --image &lt;ref&gt; --dockerfile Dockerfile</span> and refresh this page.
+            </p>
+          </div>
+        ) : (
           <div role="tabpanel">
             {tab === "overview" && <Overview scans={attribution} themeKey={themeKey} />}
             {tab === "findings" && <Findings scanId={effectiveScanId} />}
             {tab === "pins" && <Pins />}
             {tab === "base" && <BaseImages scanId={effectiveScanId} />}
           </div>
-        </>
-      )}
+        )}
+      </main>
     </div>
   );
 }
