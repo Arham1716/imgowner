@@ -117,6 +117,30 @@ is kept up to date on the pull request rather than a new one per run.
 
 A complete workflow is in [`examples/github-workflow.yml`](examples/github-workflow.yml).
 
+## Verifying a release
+
+Every release artifact is signed keyless with [cosign](https://github.com/sigstore/cosign)
+by the release workflow's own GitHub identity; no signing key exists to steal.
+Each archive, the extension (`.vsix`) and each SBOM has a `.bundle` beside it:
+
+```sh
+cosign verify-blob --bundle imgowner_X_linux_amd64.tar.gz.bundle \
+  --certificate-identity-regexp '^https://github.com/Arham1716/imgowner/.github/workflows/release.yml@refs/tags/vX$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  imgowner_X_linux_amd64.tar.gz
+
+# the container image is signed the same way
+cosign verify ghcr.io/arham1716/imgowner:X \
+  --certificate-identity-regexp '^https://github.com/Arham1716/imgowner/.github/workflows/release.yml@refs/tags/vX$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Replace `X` with the version. Each archive and the container image come with a
+signed SPDX SBOM. Builds are reproducible: from a checkout of the tag,
+`.github/scripts/verify-reproducible.sh X ./imgowner` (with Go 1.26.10 and the
+binary extracted from the linux/amd64 archive) rebuilds it and checks it is
+byte-identical to the released one.
+
 ## Configuration
 
 `imgowner` reads `.imgowner.yaml` from the working directory. Every key is

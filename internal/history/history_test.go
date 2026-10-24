@@ -369,3 +369,58 @@ func TestDefaultDir_IsPerUserNotWorkingDirectory(t *testing.T) {
 		t.Errorf("DefaultDir = %q, want an absolute .../imgowner/history", d)
 	}
 }
+
+// Records are immutable, so listing reads a file once. But the listing must
+// still follow the directory: a record another process adds shows up, and one
+// that is deleted (retention) disappears.
+func TestList_CacheFollowsTheDirectory(t *testing.T) {
+	s := newStore(t)
+	a, err := s.Append(NewRecord(sampleInput()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sums, _, _ := s.List(); len(sums) != 1 || sums[0].ID != a {
+		t.Fatalf("first listing = %+v", sums)
+	}
+
+	// Another process (a second Store over the same directory) writes a record.
+	other, err := Open(s.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := other.Append(NewRecord(sampleInput()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sums, _, _ := s.List(); len(sums) != 2 {
+		t.Fatalf("a record written by another process must appear, got %d", len(sums))
+	}
+
+	// Retention deletes the first one.
+	if err := os.Remove(s.path(a)); err != nil {
+		t.Fatal(err)
+	}
+	sums, _, _ := s.List()
+	if len(sums) != 1 || sums[0].ID != b {
+		t.Fatalf("a deleted record must drop out of the listing, got %+v", sums)
+	}
+}
+
+// A file that could not be read is retried on the next listing, not cached as bad.
+func TestList_UnreadableFileIsRetried(t *testing.T) {
+	s := newStore(t)
+	id := "20260101T000000.000000000Z-deadbeef"
+	if err := os.WriteFile(s.path(id), []byte("{broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, skipped, _ := s.List(); skipped != 1 {
+		t.Fatalf("skipped = %d, want 1", skipped)
+	}
+	good := `{"summary":{"id":"` + id + `","counts":{}}}`
+	if err := os.WriteFile(s.path(id), []byte(good), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if sums, skipped, _ := s.List(); len(sums) != 1 || skipped != 0 {
+		t.Errorf("after the file is fixed: %d summaries, %d skipped; want 1, 0", len(sums), skipped)
+	}
+}

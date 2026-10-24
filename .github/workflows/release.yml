@@ -66,11 +66,56 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COSIGN_EXPERIMENTAL: '1'
 
+      # FR-41: the VS Code extension ships with the release.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+
+      - name: Build the VS Code extension
+        working-directory: editors/vscode
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          npm ci --ignore-scripts
+          npx tsc -p ./
+          npx vsce package --no-dependencies -o "$GITHUB_WORKSPACE/dist/imgowner-vscode_${VERSION}.vsix"
+
+      # FR-43: an SBOM for the container image too (goreleaser only produces
+      # them for the archives). Scanned by digest, not tag, so it describes
+      # exactly the image that was pushed.
+      - name: SBOM for the container image
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          DIGEST="$(docker buildx imagetools inspect "ghcr.io/arham1716/imgowner:${VERSION}" --format '{{json .Manifest}}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')"
+          echo "container image digest: ${DIGEST}"
+          syft "ghcr.io/arham1716/imgowner@${DIGEST}" --output "spdx-json=dist/imgowner_${VERSION}_container.spdx.json"
+
+      # FR-42: the same keyless identity signs the extra artifacts.
+      - name: Sign the extension and the image SBOM
+        run: |
+          for f in dist/imgowner-vscode_*.vsix dist/imgowner_*_container.spdx.json; do
+            cosign sign-blob --yes --bundle "${f}.bundle" "$f"
+          done
+
+      - name: Attach them to the draft release
+        run: gh release upload "$GITHUB_REF_NAME" dist/imgowner-vscode_*.vsix dist/imgowner-vscode_*.vsix.bundle dist/imgowner_*_container.spdx.json dist/imgowner_*_container.spdx.json.bundle --repo "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       # NFR-18: the release was created as a draft (.goreleaser.yml); it only
-      # becomes visible if every archive contains nothing beyond the product
-      # allowlist. A failure here leaves the draft in place.
+      # becomes visible if the archives, the extension and the container
+      # image each contain nothing beyond the product allowlist. A failure
+      # here leaves the draft in place.
       - name: Check release contents (NFR-18)
-        run: .github/scripts/check-release-contents.sh dist
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          .github/scripts/check-release-contents.sh dist
+          .github/scripts/check-vsix-contents.sh "dist/imgowner-vscode_${VERSION}.vsix"
+          python3 .github/scripts/check-image-contents.py "ghcr.io/arham1716/imgowner:${VERSION}"
+
+      # NFR-16: rebuild the linux/amd64 binary from this tag and require it to
+      # be byte-identical to the one goreleaser just built.
+      - name: Check the build is reproducible (NFR-16)
+        run: .github/scripts/verify-reproducible.sh "${GITHUB_REF_NAME#v}"
 
       - name: Publish the release
         run: gh release edit "$GITHUB_REF_NAME" --draft=false --repo "$GITHUB_REPOSITORY"

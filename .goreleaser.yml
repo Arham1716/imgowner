@@ -28,14 +28,21 @@ builds:
     # the binary; mod_timestamp pins file mtimes in the build to the tagged
     # commit's own timestamp instead of wall-clock build time, so rebuilding
     # the tag produces byte-identical output.
+    # -buildvcs=false: Go would otherwise stamp the VCS state of whichever
+    # checkout does the build into the binary.
     flags:
       - -trimpath
+      - -buildvcs=false
     mod_timestamp: "{{ .CommitTimestamp }}"
     ldflags:
       - -s -w
       - -X main.version={{.Version}}
       - -X main.commit={{.Commit}}
-      - -X main.date={{.Date}}
+      # CommitDate, not Date: .Date is the wall-clock time of the build, so
+      # every rebuild of the same tag embedded a different timestamp and could
+      # never be byte-identical. verify-reproducible.sh rebuilds a release and
+      # compares it with what was published.
+      - -X main.date={{.CommitDate}}
 
 archives:
   - id: default

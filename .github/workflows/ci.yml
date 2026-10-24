@@ -223,6 +223,35 @@ jobs:
       - name: npm licences
         run: node .github/scripts/check-npm-licenses.mjs editors/vscode/package-lock.json web/dashboard/package-lock.json
 
+  # NFR-16: the same source must always build to the same bytes, wherever it is
+  # built from. Builds the release binary twice from two different directory
+  # paths with the release flags and requires identical hashes (-trimpath is
+  # what keeps the path out of the binary); the release workflow separately
+  # rebuilds the real tag against the published binary.
+  reproducible:
+    name: Reproducible build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Build twice from different paths and compare
+        run: |
+          mkdir -p /tmp/one /tmp/deeper/path/two
+          git archive HEAD | tar -x -C /tmp/one
+          git archive HEAD | tar -x -C /tmp/deeper/path/two
+          for d in /tmp/one /tmp/deeper/path/two; do
+            (cd "$d" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false               -ldflags "-s -w -X main.version=0.0.0-ci -X main.commit=0000 -X main.date=2000-01-01T00:00:00Z"               -o imgowner ./cmd/imgowner)
+          done
+          sha256sum /tmp/one/imgowner /tmp/deeper/path/two/imgowner
+          [ "$(sha256sum < /tmp/one/imgowner)" = "$(sha256sum < /tmp/deeper/path/two/imgowner)" ]             || { echo "::error::the same source built to different binaries from different paths"; exit 1; }
+
   # FR-33, NFR-11, NFR-15, NFR-19: the dashboard's compiled bundle is committed
   # (so `go install` users get it without Node); this rebuilds it from source
   # and fails on any difference, so no hand-edited or stale JavaScript can sit
