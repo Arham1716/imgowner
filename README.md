@@ -51,6 +51,11 @@ versions are resolved by querying the package manager inside the image.
 imgowner attribute --image myapp:latest --dockerfile Dockerfile
 ```
 
+The image is read from its registry. An image you have only built locally
+(`docker build -t myapp:latest .`, never pushed) is read from the local Docker
+or Podman image store instead, so you can scan before pushing. The registry
+always wins when it has the tag, so a stale local copy never shadows it.
+
 ### Check whether pinned package versions are stale
 
 ```bash

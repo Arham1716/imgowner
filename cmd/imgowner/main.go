@@ -724,12 +724,13 @@ func filterNewFindings(
 	runner *scan.Runner,
 	platform string,
 ) []attribution.Finding {
-	baseInfo, err := image.Resolve(ctx, baseImageRef, platform)
+	baseInfo, err := image.ResolveAny(ctx, baseImageRef, platform)
 	if err != nil {
 		// Can't reach baseline — return all findings (fail open, not closed).
 		return findings
 	}
-	baseResult, err := runner.Scan(ctx, baseInfo.Ref, baseInfo.Digest)
+	defer func() { _ = baseInfo.Close() }()
+	baseResult, err := pipeline.ScanImage(ctx, runner, baseInfo)
 	if err != nil {
 		return findings
 	}
