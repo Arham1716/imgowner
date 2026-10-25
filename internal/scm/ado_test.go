@@ -70,4 +70,3 @@ func TestADO_EnsureComment_UpdatesExistingMarkedComment(t *testing.T) {
 		t.Errorf("expected PATCH to thread 6 comment 2 (the marked one), got path %q", patchedPath)
 	}
 }
-

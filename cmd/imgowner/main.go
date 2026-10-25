@@ -899,14 +899,14 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 			// and no clue why.
 			if prID != "" {
 				if err := postComment(ctx, cfg, prID, report.Request{
-						Image:      imageRef,
-						Digest:     res.Digest,
-						BaseRef:    baseRef,
-						Findings:   findings,
-						Candidates: candidates,
-						Pins:       pinList,
-						PinsNote:   pinsNote,
-						Verdict:    verdict,
+					Image:      imageRef,
+					Digest:     res.Digest,
+					BaseRef:    baseRef,
+					Findings:   findings,
+					Candidates: candidates,
+					Pins:       pinList,
+					PinsNote:   pinsNote,
+					Verdict:    verdict,
 					Formats:    []string{"md"},
 					Dockerfile: dockerfilePath,
 				}); err != nil {
