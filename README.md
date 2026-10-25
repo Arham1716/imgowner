@@ -81,6 +81,16 @@ imgowner ci --image myapp:${GIT_SHA} --dockerfile Dockerfile \
 
 Exit codes: `0` clean, `1` policy breach, `2` tool or configuration error.
 
+Both `attribute` and `ci` write one file per format (`imgowner-report.md`,
+`.json`, `.sarif`) under `--output-dir` (default `report.output_dir`,
+`./imgowner-report`) and list the paths on stderr. `--format` takes a
+comma-separated list or can be repeated; an unknown format is an error. For a
+single format on stdout, use `--output-dir -`:
+
+```bash
+imgowner attribute --image myapp:latest --format json --output-dir - | jq '.findings | length'
+```
+
 ## Base image digests
 
 Attribution works by checking that the base image's layers form an exact prefix

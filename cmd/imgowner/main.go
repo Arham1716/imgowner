@@ -131,6 +131,7 @@ func attributeCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 		dockerfilePath string
 		baseDigest     string
 		formats        []string
+		outputDir      string
 		baseCandidates int
 	)
 
@@ -163,6 +164,12 @@ func attributeCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 			if err != nil {
 				return writeStructuredError(structuredScanErr(err))
 			}
+			// Settled before the scan, so a bad --format fails in a second,
+			// not after a ten-minute scan.
+			fmts, outDir, err := reportTarget(formats, outputDir, cfg)
+			if err != nil {
+				return writeStructuredError(map[string]string{"error": err.Error()})
+			}
 
 			n := cfg.Scan.BaseCandidates
 			if baseCandidates > 0 {
@@ -183,17 +190,21 @@ func attributeCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 			}
 			warnAboutAttribution(res)
 
-			// Write reports (FR-21, FR-22, FR-23).
-			if err := report.Write(report.Request{
+			// Write reports (FR-28): one file per format, or one format on stdout.
+			written, err := report.Write(report.Request{
 				Image:      imageRef,
 				Digest:     res.Digest,
 				BaseRef:    res.BaseRef,
 				Findings:   res.Findings,
 				Candidates: res.Candidates,
-				Formats:    formats,
-			}); err != nil {
+				Formats:    fmts,
+				OutputDir:  outDir,
+				Dockerfile: dockerfilePath,
+			})
+			if err != nil {
 				return writeStructuredError(map[string]string{"error": err.Error()})
 			}
+			announce(written)
 			recordHistory(cfg, history.Input{
 				Command:    "attribute",
 				Image:      imageRef,
@@ -210,7 +221,8 @@ func attributeCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 	cmd.Flags().StringVar(&imageRef, "image", "", "image reference to scan (required)")
 	cmd.Flags().StringVar(&dockerfilePath, "dockerfile", "Dockerfile", "path to Dockerfile")
 	cmd.Flags().StringVar(&baseDigest, "base-digest", "", "override base image digest")
-	cmd.Flags().StringArrayVar(&formats, "format", []string{"md", "json"}, "output formats (md,json,sarif)")
+	cmd.Flags().StringArrayVar(&formats, "format", nil, "report formats, comma-separated or repeated (md,json,sarif); overrides report.formats")
+	cmd.Flags().StringVar(&outputDir, "output-dir", "", "directory for report files (default report.output_dir); '-' writes a single format to stdout")
 	cmd.Flags().IntVar(&baseCandidates, "base-candidates", 0, "override base_candidates from config")
 	return cmd
 }
@@ -548,6 +560,10 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 			if err != nil {
 				return writeStructuredError(structuredScanErr(err))
 			}
+			fmts, outDir, err := reportTarget(formats, outputDir, cfg)
+			if err != nil {
+				return writeStructuredError(map[string]string{"error": err.Error()})
+			}
 
 			// FR-25: new_only requires --base-image-ref (F1 gate).
 			if cfg.Policy.NewOnly && baseImageRef == "" {
@@ -597,16 +613,8 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 			// ── Policy evaluation (FR-27) ─────────────────────────────────
 			exitCode := evaluatePolicy(findings, cfg)
 
-			// ── Report writing (FR-21, FR-22, FR-23) ─────────────────────
-			fmts := formats
-			if len(fmts) == 0 {
-				fmts = cfg.Report.Formats
-			}
-			outDir := outputDir
-			if outDir == "" {
-				outDir = cfg.Report.OutputDir
-			}
-			if err := report.Write(report.Request{
+			// ── Report writing (FR-28) ────────────────────────────────────
+			written, err := report.Write(report.Request{
 				Image:      imageRef,
 				Digest:     res.Digest,
 				BaseRef:    baseRef,
@@ -614,9 +622,12 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 				Candidates: candidates,
 				OutputDir:  outDir,
 				Formats:    fmts,
-			}); err != nil {
+				Dockerfile: dockerfilePath,
+			})
+			if err != nil {
 				return writeStructuredError(map[string]string{"error": err.Error()})
 			}
+			announce(written)
 			// Recorded before the policy verdict is returned: a breach (exit 1)
 			// is a completed scan and belongs in the history too (FR-31).
 			recordHistory(cfg, history.Input{
@@ -642,6 +653,7 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 						Findings:   findings,
 						Candidates: candidates,
 						Formats:    []string{"md"},
+						Dockerfile: dockerfilePath,
 					})
 					_ = client.EnsureComment(ctx, prID, commentBuf.String())
 				}
@@ -657,12 +669,41 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 	cmd.Flags().StringVar(&baseImageRef, "base-image-ref", "", "baseline image ref for new_only diff")
 	cmd.Flags().StringVar(&baseDigest, "base-digest", "", "digest of the base image used at build time (sha256:...)")
 	cmd.Flags().StringVar(&dockerfilePath, "dockerfile", "Dockerfile", "path to Dockerfile")
-	cmd.Flags().StringArrayVar(&formats, "format", nil, "output formats (md,json,sarif); overrides config")
-	cmd.Flags().StringVar(&outputDir, "output-dir", "", "directory for report files; overrides config")
+	cmd.Flags().StringArrayVar(&formats, "format", nil, "report formats, comma-separated or repeated (md,json,sarif); overrides report.formats")
+	cmd.Flags().StringVar(&outputDir, "output-dir", "", "directory for report files (default report.output_dir); '-' writes a single format to stdout")
 	cmd.Flags().StringVar(&prID, "pr-id", "", "PR number/ID to post attribution comment on")
 	cmd.Flags().BoolVar(&failOnBaseMismatch, "fail-on-base-mismatch", true,
 		"exit with an error when the base image boundary cannot be verified")
 	return cmd
+}
+
+// reportTarget resolves the formats and output directory from flags over
+// config, validating them before any scan runs.
+func reportTarget(flagFormats []string, flagDir string, cfg config.Config) ([]string, string, error) {
+	src := flagFormats
+	if len(src) == 0 {
+		src = cfg.Report.Formats
+	}
+	fmts, err := report.ParseFormats(src)
+	if err != nil {
+		return nil, "", err
+	}
+	dir := flagDir
+	if dir == "" {
+		dir = cfg.Report.OutputDir
+	}
+	if dir == report.Stdout && len(fmts) > 1 {
+		return nil, "", fmt.Errorf("--output-dir - writes to stdout, which holds one format; got %s", strings.Join(fmts, ", "))
+	}
+	return fmts, dir, nil
+}
+
+// announce tells the user (on stderr, keeping stdout clean) where the
+// reports went.
+func announce(paths []string) {
+	for _, p := range paths {
+		fmt.Fprintf(os.Stderr, "wrote %s\n", p)
+	}
 }
 
 // warnAboutAttribution prints a single actionable warning when attribution had
