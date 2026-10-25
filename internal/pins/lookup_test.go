@@ -137,7 +137,7 @@ func TestBuildLookupScript_RPMCapsMirrorWaits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"--setopt=timeout=15", "--setopt=retries=2", "$PM -q $PMOPTS list available wget"} {
+	for _, want := range []string{"--setopt=timeout=15", "--setopt=retries=2", "$PM -q $PMOPTS list --showduplicates wget"} {
 		if !strings.Contains(script, want) {
 			t.Errorf("rpm lookup script is missing %q:\n%s", want, script)
 		}

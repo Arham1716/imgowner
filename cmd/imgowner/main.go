@@ -263,6 +263,7 @@ func pinsCheckCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 			if err != nil {
 				return writeStructuredError(map[string]string{"error": err.Error()})
 			}
+			warnUnlookupable(pinList)
 			pinsImage := imageRef
 			if pinsImage == "" {
 				if final := df.FinalStage(); final != nil {
@@ -325,28 +326,23 @@ func runPinLookup(
 	imageRefOverride string,
 	cfg config.Config,
 ) ([]pins.Pin, error) {
-	// Group by stage name.
+	// Group by stage index: grouping by name put every unnamed stage into one
+	// group and looked them all up in the first one's image.
 	type group struct {
 		ref  string
 		idxs []int
 	}
-	groups := make(map[string]*group)
+	groups := make(map[int]*group)
 	for i, p := range pinList {
-		if groups[p.Stage] == nil {
-			// Resolve the base image ref for this stage.
+		if groups[p.StageIndex] == nil {
 			ref := imageRefOverride
-			if ref == "" {
-				for _, s := range df.Stages {
-					if s.Name == p.Stage {
-						ref = df.ResolveBaseRef(&s)
-						break
-					}
-				}
+			if ref == "" && p.StageIndex >= 0 && p.StageIndex < len(df.Stages) {
+				ref = df.ResolveBaseRef(&df.Stages[p.StageIndex])
 			}
 			// No ref resolved — skip this stage (best effort).
-			groups[p.Stage] = &group{ref: ref}
+			groups[p.StageIndex] = &group{ref: ref}
 		}
-		groups[p.Stage].idxs = append(groups[p.Stage].idxs, i)
+		groups[p.StageIndex].idxs = append(groups[p.StageIndex].idxs, i)
 	}
 
 	for _, g := range groups {
@@ -376,18 +372,30 @@ func runPinLookup(
 	return pinList, nil
 }
 
+// warnUnlookupable prints why each variable or unsupported pin is skipped
+// (FR-13, FR-14), on stderr so --format json output stays clean.
+func warnUnlookupable(pinList []pins.Pin) {
+	for _, p := range pinList {
+		if !p.Lookupable() && p.Note != "" {
+			fmt.Fprintf(os.Stderr, "warning: %s (line %d) not checked: %s\n", p.Package, p.Line, p.Note)
+		}
+	}
+}
+
 func printPinsSummary(pinList []pins.Pin) {
 	counts := map[pins.Status]int{}
 	for _, p := range pinList {
 		counts[p.Status]++
 	}
 	fmt.Printf("Pinned packages: %d\n", len(pinList))
-	fmt.Printf("  current=%d  update-available=%d  fixes-CVE(s)=%d  unavailable=%d  unknown=%d\n",
+	fmt.Printf("  current=%d  update-available=%d  fixes-CVE(s)=%d  unavailable=%d  unknown=%d  variable=%d  unsupported=%d\n",
 		counts[pins.StatusCurrent],
 		counts[pins.StatusUpdateAvailable],
 		counts[pins.StatusFixesCVEs],
 		counts[pins.StatusUnavailable],
 		counts[pins.StatusUnknown],
+		counts[pins.StatusVariable],
+		counts[pins.StatusUnsupported],
 	)
 	for _, p := range pinList {
 		switch p.Status {
@@ -396,7 +404,13 @@ func printPinsSummary(pinList []pins.Pin) {
 		case pins.StatusFixesCVEs:
 			fmt.Printf("  FIX-CVE  %-30s %s → %s (line %d) [%d CVE(s)]\n", p.Package, p.Version, p.Available, p.Line, len(p.FixesCVEs))
 		case pins.StatusUnavailable:
-			fmt.Printf("  MISSING  %-30s %s (line %d)\n", p.Package, p.Version, p.Line)
+			if p.Available != "" {
+				fmt.Printf("  MISSING  %-30s %s → %s (line %d) [pinned version left the repository]\n", p.Package, p.Version, p.Available, p.Line)
+			} else {
+				fmt.Printf("  MISSING  %-30s %s (line %d) [package not in the repository: manual action]\n", p.Package, p.Version, p.Line)
+			}
+		case pins.StatusVariable, pins.StatusUnsupported:
+			fmt.Printf("  SKIPPED  %-30s %s (line %d) [%s]\n", p.Package, p.Version, p.Line, p.Note)
 		case pins.StatusCurrent:
 			fmt.Printf("  OK       %-30s %s (line %d)\n", p.Package, p.Version, p.Line)
 		default:
@@ -445,6 +459,7 @@ func pinsUpdateCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 				fmt.Println("No pinned OS packages found.")
 				return nil
 			}
+			warnUnlookupable(pinList)
 
 			rt, err := pins.DetectRuntime(ctx)
 			if err != nil {
@@ -503,12 +518,42 @@ func pinsUpdateCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 
 func buildPinsPRBody(pinList []pins.Pin) string {
 	var sb strings.Builder
-	sb.WriteString("## Pinned OS package updates\n\n")
-	sb.WriteString("| Package | Old | New | Status |\n|---|---|---|---|\n")
+	var updates, bumped, manual []pins.Pin
 	for _, p := range pinList {
-		if p.Status == pins.StatusUpdateAvailable || p.Status == pins.StatusFixesCVEs {
+		switch {
+		case p.Status == pins.StatusUpdateAvailable || p.Status == pins.StatusFixesCVEs:
+			updates = append(updates, p)
+		case p.Status == pins.StatusUnavailable && p.Available != "":
+			bumped = append(bumped, p)
+		case p.Status == pins.StatusUnavailable:
+			manual = append(manual, p)
+		}
+	}
+	sb.WriteString("## Pinned OS package updates\n\n")
+	if len(updates) > 0 {
+		sb.WriteString("| Package | Old | New | Status |\n|---|---|---|---|\n")
+		for _, p := range updates {
 			fmt.Fprintf(&sb, "| %s | %s | %s | %s |\n", p.Package, p.Version, p.Available, p.Status)
 		}
+		sb.WriteString("\n")
+	}
+	if len(bumped) > 0 {
+		// FR-18
+		sb.WriteString("### Unavailable pins bumped\n\nPreviously unavailable — the build would have failed with these pins.\n\n")
+		sb.WriteString("| Package | Old (gone) | New |\n|---|---|---|\n")
+		for _, p := range bumped {
+			fmt.Fprintf(&sb, "| %s | %s | %s |\n", p.Package, p.Version, p.Available)
+		}
+		sb.WriteString("\n")
+	}
+	if len(manual) > 0 {
+		// FR-19
+		sb.WriteString("### Requires manual action\n\nThese packages are no longer in the OS repository at all; their pins were left unchanged.\n\n")
+		sb.WriteString("| Package | Last pinned version | Line |\n|---|---|---|\n")
+		for _, p := range manual {
+			fmt.Fprintf(&sb, "| %s | %s | %d |\n", p.Package, p.Version, p.Line)
+		}
+		sb.WriteString("\n")
 	}
 	return sb.String()
 }

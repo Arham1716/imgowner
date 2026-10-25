@@ -13,12 +13,17 @@ type Edit struct {
 }
 
 // PlanEdits builds the list of byte-level edits needed to update the given
-// pins to their Available versions (Story 3.1, FR-17).
-// Only pins with Status == StatusUpdateAvailable or StatusFixesCVEs are included.
+// pins to their Available versions (Story 3.1, FR-17). It covers pins with a
+// newer version (update-available, fixes-CVE(s)) and pins whose exact version
+// has left the repository but whose package is still there (unavailable with
+// an Available version, FR-18: the build would fail as written). A package
+// gone entirely has no Available version and is left alone (FR-19).
 func PlanEdits(pinList []Pin) []Edit {
 	var edits []Edit
 	for _, p := range pinList {
-		if p.Status != StatusUpdateAvailable && p.Status != StatusFixesCVEs {
+		switch p.Status {
+		case StatusUpdateAvailable, StatusFixesCVEs, StatusUnavailable:
+		default:
 			continue
 		}
 		if p.Available == "" || p.ByteOffset < 0 {
