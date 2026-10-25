@@ -344,7 +344,6 @@ func runPinLookup(
 				}
 			}
 			// No ref resolved — skip this stage (best effort).
-			_ = cfg
 			groups[p.Stage] = &group{ref: ref}
 		}
 		groups[p.Stage].idxs = append(groups[p.Stage].idxs, i)
@@ -358,7 +357,10 @@ func runPinLookup(
 		for j, idx := range g.idxs {
 			stgPins[j] = pinList[idx]
 		}
-		updated, err := pins.LookupVersions(ctx, rt, g.ref, stgPins)
+		// pins.lookup_timeout (NFR-09) bounds each stage's container run.
+		lookupCtx, cancelLookup := context.WithTimeout(ctx, cfg.Pins.LookupDuration())
+		updated, err := pins.LookupVersions(lookupCtx, rt, g.ref, stgPins)
+		cancelLookup()
 		var lookupErr *pins.LookupFailedError
 		if errors.As(err, &lookupErr) {
 			// Warn on stderr, keep going: stdout must stay clean JSON for
