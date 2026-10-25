@@ -51,17 +51,18 @@ func Attribute(ctx context.Context, req AttributeRequest) (*AttributeResult, err
 		return nil, fmt.Errorf("pipeline: dockerfile %s: %w", req.DockerfilePath, err)
 	}
 
-	info, err := image.Resolve(ctx, req.ImageRef, req.Platform)
+	info, err := image.ResolveAny(ctx, req.ImageRef, req.Platform)
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = info.Close() }()
 
 	runner := &scan.Runner{
 		TrivyVersion: req.TrivyVersion,
 		Platform:     req.Platform,
 		Timeout:      req.Timeout,
 	}
-	result, err := runner.Scan(ctx, info.Ref, info.Digest)
+	result, err := scanImage(ctx, runner, info)
 	if err != nil {
 		return nil, err
 	}
@@ -105,6 +106,21 @@ func Attribute(ctx context.Context, req AttributeRequest) (*AttributeResult, err
 	}
 
 	return out, nil
+}
+
+// scanImage scans a registry image by reference, or a local image through
+// the archive it was exported to.
+func scanImage(ctx context.Context, runner *scan.Runner, info *image.ImageInfo) (*scan.Result, error) {
+	if info.Local {
+		return runner.ScanArchive(ctx, info.Archive, info.Digest)
+	}
+	return runner.Scan(ctx, info.Ref, info.Digest)
+}
+
+// ScanImage is scanImage for callers outside the package (the new_only
+// baseline in the ci command).
+func ScanImage(ctx context.Context, runner *scan.Runner, info *image.ImageInfo) (*scan.Result, error) {
+	return scanImage(ctx, runner, info)
 }
 
 // isSquashed reports whether the scan produced vulnerabilities but none of them

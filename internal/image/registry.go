@@ -15,10 +15,28 @@ import (
 
 // ImageInfo holds the resolved digest and the full image manifest/config.
 type ImageInfo struct {
-	// Ref is the digest-pinned reference, e.g. python:3.12-slim@sha256:abc123
+	// Ref is the digest-pinned reference, e.g. python:3.12-slim@sha256:abc123,
+	// or for a local image the reference as given.
 	Ref    string
 	Digest string
 	Image  v1.Image
+	// Archive is the exported image tarball for a local image (Local true);
+	// scanners must read it instead of pulling Ref. Empty for registry images.
+	Archive string
+	Local   bool
+
+	cleanup func() error
+}
+
+// Close removes a local image's temporary archive. It is a no-op for
+// registry images and safe to call more than once.
+func (i *ImageInfo) Close() error {
+	if i == nil || i.cleanup == nil {
+		return nil
+	}
+	err := i.cleanup()
+	i.cleanup = nil
+	return err
 }
 
 // Resolve resolves imageRef to a digest-pinned reference and fetches the image
@@ -55,11 +73,14 @@ func Resolve(ctx context.Context, imageRef, platform string) (*ImageInfo, error)
 }
 
 // Config fetches the image config file, which contains history and rootfs.diff_ids.
+// A base image built locally (FROM an image that was never pushed) is read
+// from the local image store, as for the image being scanned.
 func Config(ctx context.Context, imageRef, platform string) (*v1.ConfigFile, error) {
-	info, err := Resolve(ctx, imageRef, platform)
+	info, err := ResolveAny(ctx, imageRef, platform)
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = info.Close() }()
 	cf, err := info.Image.ConfigFile()
 	if err != nil {
 		return nil, fmt.Errorf("imgowner: fetching config for %s: %w", imageRef, err)

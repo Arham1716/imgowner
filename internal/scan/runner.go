@@ -74,6 +74,16 @@ type Runner struct {
 // parsed result. Uses the digest cache; skips Trivy if a valid cache entry
 // exists (DQ-1). imageRef must be in the form name@sha256:... .
 func (r *Runner) Scan(ctx context.Context, imageRef, digest string) (*Result, error) {
+	return r.scan(ctx, imageRef, "", digest)
+}
+
+// ScanArchive scans an exported image tarball (a locally built image that
+// was never pushed) with `trivy image --input`, under the same cache rules.
+func (r *Runner) ScanArchive(ctx context.Context, archive, digest string) (*Result, error) {
+	return r.scan(ctx, archive, archive, digest)
+}
+
+func (r *Runner) scan(ctx context.Context, imageRef, archive, digest string) (*Result, error) {
 	// A cached result is only reused for the same Trivy version and the same
 	// vulnerability DB; anything else could hide CVEs published since.
 	stamp, err := DBStamp(ctx)
@@ -104,7 +114,11 @@ func (r *Runner) Scan(ctx context.Context, imageRef, digest string) (*Result, er
 		"--scanners", "vuln",
 		"--platform", r.Platform,
 		"--quiet",
-		imageRef,
+	}
+	if archive != "" {
+		args = append(args, "--input", archive)
+	} else {
+		args = append(args, imageRef)
 	}
 	cmd := exec.CommandContext(ctx, "trivy", args...)
 	raw, err := safeio.Output(cmd, safeio.MaxTrivyReport, "trivy report")
