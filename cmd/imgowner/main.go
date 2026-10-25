@@ -423,6 +423,72 @@ func runPinLookup(
 	return pinList, nil
 }
 
+// ciPins runs the pin check inside ci (FR-23). It never fails the command:
+// a missing container runtime or a failed lookup is reported in the notes
+// (FR-27: "never skip silently") and the attribution result stands. Pins
+// whose upgrade reaches the fixed version of an attributed CVE on that
+// package are promoted to fixes-CVE(s) (FR-16).
+func ciPins(ctx context.Context, cfg config.Config, dockerfilePath string, findings []attribution.Finding) ([]pins.Pin, string) {
+	if !cfg.Pins.Enabled {
+		return nil, ""
+	}
+	content, err := safeio.ReadFile(dockerfilePath, safeio.MaxDockerfile)
+	if err != nil {
+		return nil, "Pin check skipped — " + err.Error()
+	}
+	df, err := dockerfile.ParseBytes(content)
+	if err != nil {
+		return nil, "Pin check skipped — " + err.Error()
+	}
+	pinList, err := pins.Extract(content, df, cfg.Pins.IgnorePackages...)
+	if err != nil {
+		return nil, "Pin check skipped — " + err.Error()
+	}
+	if len(pinList) == 0 {
+		return nil, ""
+	}
+	warnUnlookupable(pinList)
+	rt, err := pins.DetectRuntime(ctx)
+	if err != nil {
+		note := "Pin check skipped — no container runtime detected (install Docker or Podman to check pinned versions)"
+		fmt.Fprintln(os.Stderr, "warning: "+note)
+		return pinList, note
+	}
+	pinList, err = runPinLookup(ctx, rt, pinList, df, "", cfg)
+	if err != nil {
+		note := "Pin check incomplete — " + err.Error()
+		fmt.Fprintln(os.Stderr, "warning: "+note)
+		return pinList, note
+	}
+	return pins.ApplyCVEFixes(pinList, cveFixesFor(pinList, findings)), ""
+}
+
+// cveFixesFor maps each pinned package to the attributed CVEs its available
+// upgrade would fix: findings on that package, at the pinned version, whose
+// fixed version the upgrade reaches.
+func cveFixesFor(pinList []pins.Pin, findings []attribution.Finding) map[string][]string {
+	out := map[string][]string{}
+	for _, p := range pinList {
+		if p.Available == "" {
+			continue
+		}
+		seen := map[string]bool{}
+		for _, f := range findings {
+			if f.Package != p.Package || f.InstalledVersion != p.Version || f.FixedVersion == "" || seen[f.CVE] {
+				continue
+			}
+			for _, fixed := range strings.Split(f.FixedVersion, ",") {
+				if fixed = strings.TrimSpace(fixed); fixed != "" && pins.VersionAtLeast(p.Available, fixed) {
+					out[p.Package] = append(out[p.Package], f.CVE)
+					seen[f.CVE] = true
+					break
+				}
+			}
+		}
+	}
+	return out
+}
+
 // warnUnlookupable prints why each variable or unsupported pin is skipped
 // (FR-13, FR-14), on stderr so --format json output stays clean.
 func warnUnlookupable(pinList []pins.Pin) {
@@ -704,8 +770,16 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 				}
 			}
 
-			// ── Policy evaluation (FR-27) ─────────────────────────────────
+			// ── Pin check (FR-23, FR-27) ─────────────────────────────────
+			pinList, pinsNote := ciPins(ctx, cfg, dockerfilePath, findings)
+
+			// ── Policy evaluation ─────────────────────────────────────────
 			breaching := evaluatePolicy(findings, cfg)
+			verdict := "passed"
+			if breaching > 0 {
+				verdict = fmt.Sprintf("failed — %d finding(s) at or above %s owned by %s",
+					breaching, strings.Join(cfg.Policy.FailOn, "/"), enforcedOwners(cfg))
+			}
 
 			// ── Report writing (FR-28) ────────────────────────────────────
 			written, err := report.Write(report.Request{
@@ -714,6 +788,9 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 				BaseRef:    baseRef,
 				Findings:   findings,
 				Candidates: candidates,
+				Pins:       pinList,
+				PinsNote:   pinsNote,
+				Verdict:    verdict,
 				OutputDir:  outDir,
 				Formats:    fmts,
 				Dockerfile: dockerfilePath,
@@ -732,6 +809,7 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 				Dockerfile: dockerfilePath,
 				Findings:   findings,
 				Candidates: candidates,
+				Pins:       pinList,
 			})
 
 			// ── SCM comment (FR-24) ───────────────────────────────────────
@@ -746,6 +824,9 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 						BaseRef:    baseRef,
 						Findings:   findings,
 						Candidates: candidates,
+						Pins:       pinList,
+						PinsNote:   pinsNote,
+						Verdict:    verdict,
 						Formats:    []string{"md"},
 						Dockerfile: dockerfilePath,
 					})
