@@ -18,12 +18,30 @@ const defaultLookupTimeout = 5 * time.Minute
 
 // LookupVersions runs one container per stage to query the available versions
 // of all pinned packages in that stage (FR-14, FR-15).
-// It populates Pin.Available and sets Status to StatusUnavailable if the
-// package is absent from the repo.
+// It populates Pin.Available and Status. Pins that can't be looked up
+// (variable, unsupported) are left exactly as they are.
 func LookupVersions(ctx context.Context, rt Runtime, imageRef string, pins []Pin) ([]Pin, error) {
-	if len(pins) == 0 {
+	var idx []int
+	for i, p := range pins {
+		if p.Lookupable() {
+			idx = append(idx, i)
+		}
+	}
+	if len(idx) == 0 {
 		return pins, nil
 	}
+	sub := make([]Pin, len(idx))
+	for j, i := range idx {
+		sub[j] = pins[i]
+	}
+	looked, err := lookupVersions(ctx, rt, imageRef, sub)
+	for j, i := range idx {
+		pins[i] = looked[j]
+	}
+	return pins, err
+}
+
+func lookupVersions(ctx context.Context, rt Runtime, imageRef string, pins []Pin) ([]Pin, error) {
 
 	// The caller's deadline (pins.lookup_timeout) wins; a library caller that
 	// set none still gets a bound rather than an unbounded container run.
@@ -113,10 +131,13 @@ func runFailureDetail(err error) string {
 
 // buildLookupScript produces a shell script that outputs one line per package:
 //
-//	CURRENT|<pkg>|<pinned>|<latest>
-//	UPDATE|<pkg>|<pinned>|<latest>
-//	UNAVAILABLE|<pkg>
+//	CURRENT|<pkg>|<pinned>|<latest>      pinned is the newest available
+//	UPDATE|<pkg>|<pinned>|<latest>       pinned exists, a newer one does too
+//	MISSING|<pkg>|<pinned>|<latest>      the package exists, the pinned version doesn't (FR-18)
+//	UNAVAILABLE|<pkg>                    the package isn't in the repository at all (FR-19)
 //
+// Each manager lists every available version, so "is the pinned version
+// there?" is answered directly (FR-16) instead of inferred from the newest.
 // FR-15: batched into a single container run per stage.
 func buildLookupScript(mgr string, pins []Pin) (string, error) {
 	var b strings.Builder
@@ -134,12 +155,16 @@ func buildLookupScript(mgr string, pins []Pin) (string, error) {
 			// Escape package name for shell safety (packages can contain letters, digits, +, -, .).
 			pkg := sanitizeIdentifier(p.Package)
 			pin := sanitizeVersion(p.Version)
+			// madison lists every version in the configured sources; the
+			// newest is chosen with dpkg's own ordering.
 			fmt.Fprintf(&b,
-				`LATEST=$(apt-cache madison %s 2>/dev/null | awk -F'|' 'NR==1{gsub(/ /,"",$2);print $2}'); `+
+				`VERS=$(apt-cache madison %s 2>/dev/null | awk -F'|' '{gsub(/ /,"",$2); print $2}'); LATEST=""; `+
+					`for v in $VERS; do if [ -z "$LATEST" ] || dpkg --compare-versions "$v" gt "$LATEST"; then LATEST=$v; fi; done; `+
 					`if [ -z "$LATEST" ]; then echo "UNAVAILABLE|%s"; `+
+					`elif ! printf '%%s\n' $VERS | grep -qxF "%s"; then echo "MISSING|%s|%s|$LATEST"; `+
 					`elif dpkg --compare-versions "$LATEST" gt "%s" 2>/dev/null; then echo "UPDATE|%s|%s|$LATEST"; `+
 					`else echo "CURRENT|%s|%s|$LATEST"; fi; `,
-				pkg, pkg, pin, pkg, pin, pkg, pin,
+				pkg, pkg, pin, pkg, pin, pin, pkg, pin, pkg, pin,
 			)
 		}
 
@@ -149,13 +174,17 @@ func buildLookupScript(mgr string, pins []Pin) (string, error) {
 		for _, p := range pins {
 			pkg := sanitizeIdentifier(p.Package)
 			pin := sanitizeVersion(p.Version)
-			// apk search returns "pkgname-version"; strip the prefix to get version.
+			// "apk policy" lists every version the repositories offer, each on
+			// a "  <version>:" line. (The previous `apk search -q` printed bare
+			// names with no version, so every Alpine pin read "unavailable".)
 			fmt.Fprintf(&b,
-				`LATEST=$(apk search -q "^%s" 2>/dev/null | grep "^%s-[0-9]" | sort -V | tail -1 | sed "s/^%s-//"); `+
+				`VERS=$(apk policy %s 2>/dev/null | sed -n 's/^  \([^ ][^ ]*\):$/\1/p'); LATEST=""; `+
+					`for v in $VERS; do if [ -z "$LATEST" ] || [ "$(apk version -t "$v" "$LATEST")" = ">" ]; then LATEST=$v; fi; done; `+
 					`if [ -z "$LATEST" ]; then echo "UNAVAILABLE|%s"; `+
-					`elif apk version -t "$LATEST" "%s" 2>/dev/null | grep -q ">"; then echo "UPDATE|%s|%s|$LATEST"; `+
+					`elif ! printf '%%s\n' $VERS | grep -qxF "%s"; then echo "MISSING|%s|%s|$LATEST"; `+
+					`elif [ "$(apk version -t "$LATEST" "%s")" = ">" ]; then echo "UPDATE|%s|%s|$LATEST"; `+
 					`else echo "CURRENT|%s|%s|$LATEST"; fi; `,
-				pkg, pkg, pkg, pkg, pin, pkg, pin, pkg, pin,
+				pkg, pkg, pin, pkg, pin, pin, pkg, pin, pkg, pin,
 			)
 		}
 
@@ -176,14 +205,17 @@ func buildLookupScript(mgr string, pins []Pin) (string, error) {
 		for _, p := range pins {
 			pkg := sanitizeIdentifier(p.Package)
 			pin := sanitizeVersion(p.Version)
-			// "dnf list available" prints "name.arch  version-release  repo";
-			// take the newest version column for this exact package name.
+			// "dnf list --showduplicates" prints "name.arch  [epoch:]version-release
+			// repo" for every version, installed or available. Epochs are
+			// dropped to match how pins are written; sort -V orders the rest.
 			fmt.Fprintf(&b,
-				`LATEST=$($PM -q $PMOPTS list available %s 2>/dev/null | awk '$1 ~ /^%s\./ {print $2}' | sort -V | tail -1); `+
+				`VERS=$($PM -q $PMOPTS list --showduplicates %s 2>/dev/null | awk '$1 ~ /^%s\./ {sub(/^[0-9]+:/, "", $2); print $2}' | sort -uV); `+
+					`LATEST=$(printf '%%s\n' $VERS | tail -1); P=$(echo "%s" | sed 's/^[0-9]*://'); `+
 					`if [ -z "$LATEST" ]; then echo "UNAVAILABLE|%s"; `+
-					`elif [ "$LATEST" != "%s" ]; then echo "UPDATE|%s|%s|$LATEST"; `+
+					`elif ! printf '%%s\n' $VERS | grep -qxF "$P"; then echo "MISSING|%s|%s|$LATEST"; `+
+					`elif [ "$LATEST" != "$P" ]; then echo "UPDATE|%s|%s|$LATEST"; `+
 					`else echo "CURRENT|%s|%s|$LATEST"; fi; `,
-				pkg, pkg, pkg, pin, pkg, pin, pkg, pin,
+				pkg, pkg, pin, pkg, pkg, pin, pkg, pin, pkg, pin,
 			)
 		}
 
@@ -218,7 +250,8 @@ func parseLookupOutput(out []byte, pins []Pin) []Pin {
 		switch kind {
 		case "UNAVAILABLE":
 			p.Status = StatusUnavailable
-		case "CURRENT", "UPDATE":
+			p.Available = "" // nothing to bump to (FR-19: manual action)
+		case "CURRENT", "UPDATE", "MISSING":
 			// The version comes from a container built on an image we don't
 			// control, and PlanEdits/ApplyEdits write it verbatim into the
 			// Dockerfile of an auto-opened PR. Anything that isn't a plain
@@ -229,10 +262,14 @@ func parseLookupOutput(out []byte, pins []Pin) []Pin {
 				continue
 			}
 			p.Available = parts[3]
-			if kind == "CURRENT" {
+			switch kind {
+			case "CURRENT":
 				p.Status = StatusCurrent
-			} else {
+			case "UPDATE":
 				p.Status = StatusUpdateAvailable
+			default:
+				// The pinned version is gone; Available is what to bump to (FR-18).
+				p.Status = StatusUnavailable
 			}
 		}
 	}
