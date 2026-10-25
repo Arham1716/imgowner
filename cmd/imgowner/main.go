@@ -166,7 +166,7 @@ func attributeCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 			}
 			// Settled before the scan, so a bad --format fails in a second,
 			// not after a ten-minute scan.
-			fmts, outDir, err := reportTarget(formats, outputDir, cfg)
+			fmts, outDir, err := reportTarget(formats, outputDir, cfg, true)
 			if err != nil {
 				return writeStructuredError(map[string]string{"error": err.Error()})
 			}
@@ -222,7 +222,7 @@ func attributeCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 	cmd.Flags().StringVar(&dockerfilePath, "dockerfile", "Dockerfile", "path to Dockerfile")
 	cmd.Flags().StringVar(&baseDigest, "base-digest", "", "override base image digest")
 	cmd.Flags().StringArrayVar(&formats, "format", nil, "report formats, comma-separated or repeated (md,json,sarif); overrides report.formats")
-	cmd.Flags().StringVar(&outputDir, "output-dir", "", "directory for report files (default report.output_dir); '-' writes a single format to stdout")
+	cmd.Flags().StringVar(&outputDir, "output-dir", "", "directory for report files (default: stdout for a single --format, else report.output_dir); '-' forces stdout")
 	cmd.Flags().IntVar(&baseCandidates, "base-candidates", 0, "override base_candidates from config")
 	return cmd
 }
@@ -560,7 +560,7 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 			if err != nil {
 				return writeStructuredError(structuredScanErr(err))
 			}
-			fmts, outDir, err := reportTarget(formats, outputDir, cfg)
+			fmts, outDir, err := reportTarget(formats, outputDir, cfg, false)
 			if err != nil {
 				return writeStructuredError(map[string]string{"error": err.Error()})
 			}
@@ -679,7 +679,12 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 
 // reportTarget resolves the formats and output directory from flags over
 // config, validating them before any scan runs.
-func reportTarget(flagFormats []string, flagDir string, cfg config.Config) ([]string, string, error) {
+//
+// singleToStdout keeps attribute's long-standing behaviour: one format named
+// with --format and no --output-dir prints to stdout, which scripts and the
+// released VS Code extension (`attribute --format json`) parse. Several
+// formats never share stdout; they go to files (FR-28).
+func reportTarget(flagFormats []string, flagDir string, cfg config.Config, singleToStdout bool) ([]string, string, error) {
 	src := flagFormats
 	if len(src) == 0 {
 		src = cfg.Report.Formats
@@ -691,6 +696,9 @@ func reportTarget(flagFormats []string, flagDir string, cfg config.Config) ([]st
 	dir := flagDir
 	if dir == "" {
 		dir = cfg.Report.OutputDir
+		if singleToStdout && len(flagFormats) > 0 && len(fmts) == 1 {
+			dir = report.Stdout
+		}
 	}
 	if dir == report.Stdout && len(fmts) > 1 {
 		return nil, "", fmt.Errorf("--output-dir - writes to stdout, which holds one format; got %s", strings.Join(fmts, ", "))
