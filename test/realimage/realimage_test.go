@@ -248,7 +248,7 @@ func resolveApkCandidate(t *testing.T, baseRef string) string {
 }
 
 func resolveDnfCandidate(t *testing.T, baseRef string) string {
-	const script = `dnf -q list wget 2>/dev/null | awk '$1 ~ /^wget\./{print $2}' | tail -1`
+	const script = `dnf -q --setopt=timeout=15 --setopt=retries=2 list wget 2>/dev/null | awk '$1 ~ /^wget\./{print $2}' | tail -1`
 	out := strings.TrimSpace(dockerRunCapture(t, baseRef, script))
 	if out == "" {
 		t.Fatalf("could not resolve a dnf candidate version for wget")
@@ -258,19 +258,28 @@ func resolveDnfCandidate(t *testing.T, baseRef string) string {
 
 func dockerRunCapture(t *testing.T, imageRef, script string) string {
 	t.Helper()
-	// 5 minutes, matching pins.lookup_timeout's own default (NFR-09): this
-	// covers both the image pull and the query, and a cold pull of a large
-	// base image like rockylinux can by itself take a couple of minutes on a
-	// loaded CI runner. A real hang is still caught; this isn't unbounded.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "--entrypoint", "sh", imageRef, "-c", script)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("docker run %s: %v\nstderr: %s", imageRef, err, stderr.String())
+	// Resolving a version runs a package manager against the distribution's
+	// public mirrors, and one of them can stall for minutes (a real CI run lost
+	// five to a single slow Rocky mirror). A stalled attempt is cheap to abandon
+	// and a fresh one usually lands on a different mirror, so: three attempts,
+	// each capped well below the job's budget, rather than one long wait.
+	const attempts = 3
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "--entrypoint", "sh", imageRef, "-c", script)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		err := cmd.Run()
+		cancel()
+		if err == nil {
+			return stdout.String()
+		}
+		lastErr = fmt.Errorf("%w; stderr: %s", err, strings.TrimSpace(stderr.String()))
+		t.Logf("docker run %s failed (attempt %d of %d): %v", imageRef, attempt, attempts, lastErr)
 	}
-	return stdout.String()
+	t.Fatalf("docker run %s failed after %d attempts: %v", imageRef, attempts, lastErr)
+	return ""
 }
 
 // ── build, push, run ─────────────────────────────────────────────────────────
@@ -584,10 +593,10 @@ func assertPin(t *testing.T, f fixtureSpec, dfPath, cfgPath string) {
 		if err := json.Unmarshal(out, &pinList); err != nil {
 			t.Fatalf("parsing pins check JSON output: %v\nraw: %s", err, out)
 		}
-		if attempt == 2 || !bytes.Contains(stderr, []byte("pin version lookup")) {
+		if attempt == 3 || !bytes.Contains(stderr, []byte("pin version lookup")) {
 			break
 		}
-		t.Logf("pin lookup reported a failure (attempt %d); retrying once", attempt)
+		t.Logf("pin lookup reported a failure (attempt %d of 3); retrying", attempt)
 	}
 
 	var found *pins.Pin
@@ -629,7 +638,9 @@ func writeHistoryConfig(t *testing.T, histDir string) string {
 	path := filepath.Join(t.TempDir(), ".imgowner.yaml")
 	// Single-quoted YAML scalar: no escape processing, so a Windows path with
 	// backslashes survives when the suite is run locally.
-	cfg := "history:\n  dir: '" + strings.ReplaceAll(histDir, "'", "''") + "'\n"
+	cfg := "history:\n  dir: '" + strings.ReplaceAll(histDir, "'", "''") + "'\n" +
+		// A bounded lookup (the product default is 5m) so three attempts fit the job.
+		"pins:\n  lookup_timeout: 150s\n"
 	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
 		t.Fatalf("writing config: %v", err)
 	}
