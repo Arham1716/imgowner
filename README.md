@@ -77,6 +77,22 @@ imgowner pins update --dockerfile Dockerfile --open-pr
 Version strings are replaced at their exact byte offsets, so comments,
 line continuations and formatting are preserved.
 
+With `--open-pr` the updated Dockerfile is committed to the branch named by
+`scm.branch_prefix` (default `fix/os-pins`; a prefix ending in `/` gets
+`pin-updates` appended) and a pull request is opened against the repository's
+default branch (or `--base-branch`). A later run finds its own pull request by
+the `<!-- imgowner -->` marker and updates it; it never edits any other pull
+request. Labels in `scm.labels` are applied if they exist and skipped with a
+warning if they don't.
+
+- **GitHub:** needs `GITHUB_TOKEN` with `contents: write` and
+  `pull-requests: write`, and the repository setting *Allow GitHub Actions to
+  create and approve pull requests*.
+- **Azure DevOps:** needs `AZURE_DEVOPS_TOKEN` (a PAT with Code read/write and
+  Pull Request contribute) or the pipeline's `$(System.AccessToken)` mapped to
+  `SYSTEM_ACCESSTOKEN`. Labels are not applied there, since adding one creates
+  it.
+
 ### Run the full pipeline in CI
 
 ```bash

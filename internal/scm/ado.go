@@ -4,27 +4,41 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 
 	"github.com/Arham1716/imgowner/internal/safeio"
 )
 
+const adoAPI = "api-version=7.1"
+
+// zeroObjectID is the "no previous commit" value ADO expects when a push
+// creates a branch.
+const zeroObjectID = "0000000000000000000000000000000000000000"
+
 // adoClient implements PRClient for Azure DevOps via the REST API.
-// Auth: AZURE_DEVOPS_TOKEN env var (PAT with Code, Pull Request R/W).
+// Auth: AZURE_DEVOPS_TOKEN (a PAT with Code read/write and Pull Request
+// contribute), or the pipeline's own SYSTEM_ACCESSTOKEN (map
+// $(System.AccessToken) into the step's environment; NFR-06).
 type adoClient struct {
 	token   string
+	bearer  bool   // SYSTEM_ACCESSTOKEN is a bearer token; a PAT is basic auth
 	orgURL  string // e.g. https://dev.azure.com/myorg
 	project string
 	repo    string
 }
 
 func newADOClient() (*adoClient, error) {
-	token := os.Getenv("AZURE_DEVOPS_TOKEN")
+	token, bearer := os.Getenv("AZURE_DEVOPS_TOKEN"), false
 	if token == "" {
-		return nil, fmt.Errorf("scm: AZURE_DEVOPS_TOKEN not set")
+		token, bearer = os.Getenv("SYSTEM_ACCESSTOKEN"), true
+	}
+	if token == "" {
+		return nil, fmt.Errorf("scm: AZURE_DEVOPS_TOKEN (or SYSTEM_ACCESSTOKEN) not set")
 	}
 	orgURL := os.Getenv("SYSTEM_TEAMFOUNDATIONSERVERURI")
 	project := os.Getenv("SYSTEM_TEAMPROJECT")
@@ -32,70 +46,175 @@ func newADOClient() (*adoClient, error) {
 	if orgURL == "" || project == "" || repo == "" {
 		return nil, fmt.Errorf("scm: SYSTEM_TEAMFOUNDATIONSERVERURI / SYSTEM_TEAMPROJECT / BUILD_REPOSITORY_NAME not set")
 	}
-	return &adoClient{token: token, orgURL: strings.TrimRight(orgURL, "/"), project: project, repo: repo}, nil
+	return &adoClient{token: token, bearer: bearer, orgURL: strings.TrimRight(orgURL, "/"), project: project, repo: repo}, nil
 }
 
-func (a *adoClient) OpenOrUpdatePR(ctx context.Context, req PRRequest) (string, error) {
-	apiVer := "api-version=7.1"
-	listURL := fmt.Sprintf("%s/%s/_apis/git/repositories/%s/pullrequests?sourceRefName=refs/heads/%s&targetRefName=refs/heads/%s&status=active&%s",
-		a.orgURL, a.project, a.repo, req.HeadBranch, req.BaseBranch, apiVer)
+// repoURL builds .../{project}/_apis/git/repositories/{repo}{suffix}. Project
+// and repository names often contain spaces in ADO, so both are escaped.
+func (a *adoClient) repoURL(suffix string) string {
+	return fmt.Sprintf("%s/%s/_apis/git/repositories/%s%s",
+		a.orgURL, url.PathEscape(a.project), url.PathEscape(a.repo), suffix)
+}
 
-	data, err := a.adoGET(ctx, listURL)
-	if err != nil {
-		return "", fmt.Errorf("scm(ado): list PRs: %w", err)
+func withAPI(u string) string {
+	if strings.Contains(u, "?") {
+		return u + "&" + adoAPI
 	}
-	var list struct {
-		Count int `json:"count"`
+	return u + "?" + adoAPI
+}
+
+type adoPR struct {
+	PullRequestID int    `json:"pullRequestId"`
+	Description   string `json:"description"`
+	SourceRefName string `json:"sourceRefName"`
+}
+
+func (a *adoClient) OpenOrUpdatePR(ctx context.Context, req PRRequest) (PRResult, error) {
+	var res PRResult
+	base := req.BaseBranch
+	if base == "" {
+		var repo struct {
+			DefaultBranch string `json:"defaultBranch"`
+		}
+		if err := a.getJSON(ctx, withAPI(a.repoURL("")), &repo); err != nil {
+			return res, fmt.Errorf("scm(ado): reading the default branch: %w", err)
+		}
+		base = strings.TrimPrefix(repo.DefaultBranch, "refs/heads/")
+	}
+
+	// FR-21: find the open PR carrying the marker. The old query used
+	// sourceRefName=/targetRefName=, which ADO ignores (the parameters are
+	// searchCriteria.*), so every active PR matched and the first one --
+	// usually someone else's -- had its title and description replaced.
+	existing, err := a.findMarkedPR(ctx, base)
+	if err != nil {
+		return res, err
+	}
+	branch := BranchName(req.BranchPrefix)
+	if existing != nil {
+		branch = strings.TrimPrefix(existing.SourceRefName, "refs/heads/")
+	}
+	res.Branch = branch
+
+	if err := a.pushFile(ctx, branch, base, req.File, req.CommitMessage); err != nil {
+		return res, err
+	}
+
+	desc := req.Body + "\n\n" + prCommentMarker
+	var pr adoPR
+	if existing != nil {
+		if err := a.sendJSON(ctx, http.MethodPatch, withAPI(a.repoURL(fmt.Sprintf("/pullrequests/%d", existing.PullRequestID))),
+			map[string]string{"title": req.Title, "description": desc}, &pr); err != nil {
+			return res, fmt.Errorf("scm(ado): update PR %d: %w", existing.PullRequestID, err)
+		}
+		pr.PullRequestID = existing.PullRequestID
+	} else {
+		if err := a.sendJSON(ctx, http.MethodPost, withAPI(a.repoURL("/pullrequests")), map[string]string{
+			"title": req.Title, "description": desc,
+			"sourceRefName": "refs/heads/" + branch, "targetRefName": "refs/heads/" + base,
+		}, &pr); err != nil {
+			return res, fmt.Errorf("scm(ado): create PR: %w", err)
+		}
+		res.Created = true
+	}
+	// The API's "url" field is a REST URL; people need the web page.
+	res.URL = fmt.Sprintf("%s/%s/_git/%s/pullrequest/%d", a.orgURL, url.PathEscape(a.project), url.PathEscape(a.repo), pr.PullRequestID)
+	if len(req.Labels) > 0 {
+		// ADO PR labels are free-form tags that adding one creates; FR-22
+		// forbids creating labels, so they are not applied here.
+		res.Warnings = append(res.Warnings, "scm.labels are not applied on Azure DevOps (adding a PR label there creates it)")
+	}
+	return res, nil
+}
+
+func (a *adoClient) findMarkedPR(ctx context.Context, base string) (*adoPR, error) {
+	q := "/pullrequests?searchCriteria.status=active&searchCriteria.targetRefName=" + url.QueryEscape("refs/heads/"+base)
+	for skip := 0; skip < 5000; skip += 100 {
+		var page struct {
+			Value []adoPR `json:"value"`
+		}
+		if err := a.getJSON(ctx, withAPI(a.repoURL(fmt.Sprintf("%s&$top=100&$skip=%d", q, skip))), &page); err != nil {
+			return nil, fmt.Errorf("scm(ado): list PRs: %w", err)
+		}
+		for i := range page.Value {
+			if strings.Contains(page.Value[i].Description, prCommentMarker) {
+				return &page.Value[i], nil
+			}
+		}
+		if len(page.Value) < 100 {
+			return nil, nil
+		}
+	}
+	return nil, nil
+}
+
+// refObjectID returns the commit a branch points at, or "" if it doesn't exist.
+func (a *adoClient) refObjectID(ctx context.Context, branch string) (string, error) {
+	var refs struct {
 		Value []struct {
-			PullRequestID int    `json:"pullRequestId"`
-			URL           string `json:"url"`
+			Name     string `json:"name"`
+			ObjectID string `json:"objectId"`
 		} `json:"value"`
 	}
-	if err := json.Unmarshal(data, &list); err != nil {
-		return "", fmt.Errorf("scm(ado): parse PR list: %w", err)
+	if err := a.getJSON(ctx, withAPI(a.repoURL("/refs?filter="+url.QueryEscape("heads/"+branch))), &refs); err != nil {
+		return "", err
 	}
-
-	if list.Count > 0 {
-		id := list.Value[0].PullRequestID
-		patchURL := fmt.Sprintf("%s/%s/_apis/git/repositories/%s/pullrequests/%d?%s",
-			a.orgURL, a.project, a.repo, id, apiVer)
-		body := map[string]string{"title": req.Title, "description": req.Body + "\n\n" + prCommentMarker}
-		if _, err := a.adoPATCH(ctx, patchURL, body); err != nil {
-			return "", fmt.Errorf("scm(ado): update PR: %w", err)
+	for _, r := range refs.Value {
+		if r.Name == "refs/heads/"+branch { // the filter is a prefix match
+			return r.ObjectID, nil
 		}
-		return patchURL, nil
 	}
+	return "", nil
+}
 
-	createURL := fmt.Sprintf("%s/%s/_apis/git/repositories/%s/pullrequests?%s",
-		a.orgURL, a.project, a.repo, apiVer)
-	body := map[string]any{
-		"title":         req.Title,
-		"description":   req.Body + "\n\n" + prCommentMarker,
-		"sourceRefName": "refs/heads/" + req.HeadBranch,
-		"targetRefName": "refs/heads/" + req.BaseBranch,
+// pushFile commits f to branch, creating the branch from base if needed. An
+// existing branch gets a new commit on top (never a reset).
+func (a *adoClient) pushFile(ctx context.Context, branch, base string, f FileChange, message string) error {
+	if f.Path == "" {
+		return fmt.Errorf("scm(ado): no file to commit")
 	}
-	resp, err := a.adoPOST(ctx, createURL, body)
+	head, err := a.refObjectID(ctx, branch)
 	if err != nil {
-		return "", fmt.Errorf("scm(ado): create PR: %w", err)
+		return fmt.Errorf("scm(ado): reading branch %s: %w", branch, err)
 	}
-	var created struct {
-		URL string `json:"url"`
+	oldID, parent := head, head
+	if head == "" {
+		if parent, err = a.refObjectID(ctx, base); err != nil || parent == "" {
+			return fmt.Errorf("scm(ado): reading base branch %s: %v", base, err)
+		}
+		oldID = zeroObjectID
 	}
-	if err := json.Unmarshal(resp, &created); err != nil {
-		return "", fmt.Errorf("scm(ado): parse create response: %w", err)
+	// Skip the push when the branch already has exactly this content.
+	itemURL := a.repoURL("/items?path=" + url.QueryEscape("/"+f.Path) +
+		"&versionDescriptor.versionType=commit&versionDescriptor.version=" + parent + "&includeContent=true&$format=octetStream")
+	if current, _, err := a.do(ctx, http.MethodGet, withAPI(itemURL), nil); err == nil && bytes.Equal(current, f.Content) {
+		return nil
+	} else if err != nil && !errors.Is(err, errNotFound) {
+		return fmt.Errorf("scm(ado): reading %s: %w", f.Path, err)
 	}
-	return created.URL, nil
+	push := map[string]any{
+		"refUpdates": []map[string]string{{"name": "refs/heads/" + branch, "oldObjectId": oldID}},
+		"commits": []map[string]any{{
+			"comment": message,
+			"parents": []string{parent},
+			"changes": []map[string]any{{
+				"changeType": "edit",
+				"item":       map[string]string{"path": "/" + f.Path},
+				"newContent": map[string]string{"content": string(f.Content), "contentType": "rawtext"},
+			}},
+		}},
+	}
+	if err := a.sendJSON(ctx, http.MethodPost, withAPI(a.repoURL("/pushes")), push, nil); err != nil {
+		return fmt.Errorf("scm(ado): pushing %s to %s: %w", f.Path, branch, err)
+	}
+	return nil
 }
 
 func (a *adoClient) EnsureComment(ctx context.Context, prID string, body string) error {
-	apiVer := "api-version=7.1"
-	threadsURL := fmt.Sprintf("%s/%s/_apis/git/repositories/%s/pullrequests/%s/threads?%s",
-		a.orgURL, a.project, a.repo, prID, apiVer)
-
-	data, err := a.adoGET(ctx, threadsURL)
-	if err != nil {
-		return fmt.Errorf("scm(ado): list threads: %w", err)
+	if err := ValidPRID(prID); err != nil {
+		return err
 	}
+	threadsURL := withAPI(a.repoURL("/pullrequests/" + prID + "/threads"))
 	var threads struct {
 		Value []struct {
 			ID       int `json:"id"`
@@ -105,72 +224,84 @@ func (a *adoClient) EnsureComment(ctx context.Context, prID string, body string)
 			} `json:"comments"`
 		} `json:"value"`
 	}
-	if err := json.Unmarshal(data, &threads); err != nil {
-		return fmt.Errorf("scm(ado): parse threads: %w", err)
+	if err := a.getJSON(ctx, threadsURL, &threads); err != nil {
+		return fmt.Errorf("scm(ado): list threads: %w", err)
 	}
 
 	fullBody := prCommentMarker + "\n\n" + body
-
 	for _, t := range threads.Value {
 		for _, c := range t.Comments {
 			if strings.Contains(c.Content, prCommentMarker) {
-				patchURL := fmt.Sprintf("%s/%s/_apis/git/repositories/%s/pullrequests/%s/threads/%d/comments/%d?%s",
-					a.orgURL, a.project, a.repo, prID, t.ID, c.ID, apiVer)
-				_, err := a.adoPATCH(ctx, patchURL, map[string]string{"content": fullBody})
-				return err
+				u := withAPI(a.repoURL(fmt.Sprintf("/pullrequests/%s/threads/%d/comments/%d", prID, t.ID, c.ID)))
+				if err := a.sendJSON(ctx, http.MethodPatch, u, map[string]string{"content": fullBody}, nil); err != nil {
+					return fmt.Errorf("scm(ado): update comment: %w", err)
+				}
+				return nil
 			}
 		}
 	}
-
-	_, err = a.adoPOST(ctx, threadsURL, map[string]any{
+	if err := a.sendJSON(ctx, http.MethodPost, threadsURL, map[string]any{
 		"comments": []map[string]string{{"content": fullBody, "commentType": "text"}},
 		"status":   "active",
-	})
-	return err
-}
-
-func (a *adoClient) adoGET(ctx context.Context, url string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
+	}, nil); err != nil {
+		return fmt.Errorf("scm(ado): create comment: %w", err)
 	}
-	return a.do(req)
+	return nil
 }
 
-func (a *adoClient) adoPOST(ctx context.Context, url string, payload any) ([]byte, error) {
-	return a.adoSend(ctx, http.MethodPost, url, payload)
+func (a *adoClient) getJSON(ctx context.Context, u string, out any) error {
+	body, _, err := a.do(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(body, out)
 }
 
-func (a *adoClient) adoPATCH(ctx context.Context, url string, payload any) ([]byte, error) {
-	return a.adoSend(ctx, http.MethodPatch, url, payload)
-}
-
-func (a *adoClient) adoSend(ctx context.Context, method, url string, payload any) ([]byte, error) {
+func (a *adoClient) sendJSON(ctx context.Context, method, u string, payload, out any) error {
 	b, err := json.Marshal(payload)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(b))
-	if err != nil {
-		return nil, err
+	body, _, err := a.do(ctx, method, u, b)
+	if err != nil || out == nil {
+		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	return a.do(req)
+	return json.Unmarshal(body, out)
 }
 
-func (a *adoClient) do(req *http.Request) ([]byte, error) {
-	req.SetBasicAuth("", a.token) // ADO uses PAT as password with empty username
-	resp, err := http.DefaultClient.Do(req)
+func (a *adoClient) do(ctx context.Context, method, u string, payload []byte) ([]byte, http.Header, error) {
+	var req *http.Request
+	var err error
+	if payload != nil {
+		req, err = http.NewRequestWithContext(ctx, method, u, bytes.NewReader(payload))
+	} else {
+		req, err = http.NewRequestWithContext(ctx, method, u, nil)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("http: %w", err)
+		return nil, nil, err
+	}
+	if a.bearer {
+		req.Header.Set("Authorization", "Bearer "+a.token)
+	} else {
+		req.SetBasicAuth("", a.token) // a PAT is the password with an empty username
+	}
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, nil, fmt.Errorf("http: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, err := safeio.ReadAll(resp.Body, safeio.MaxHTTPBody, "ADO API response")
 	if err != nil {
-		return nil, fmt.Errorf("reading ADO API response: %w", err)
+		return nil, nil, fmt.Errorf("reading ADO API response: %w", err)
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil, fmt.Errorf("ADO API %s %s → 404: %w", method, req.URL.Path, errNotFound)
 	}
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("ADO API %s %s → %d: %s", req.Method, req.URL, resp.StatusCode, body)
+		return nil, nil, fmt.Errorf("ADO API %s %s → %d: %s", method, req.URL.Path, resp.StatusCode, truncate(body, 500))
 	}
-	return body, nil
+	return body, resp.Header, nil
 }

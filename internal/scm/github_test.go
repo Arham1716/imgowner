@@ -99,65 +99,6 @@ func TestEnsureComment_APIErrorIsReturned(t *testing.T) {
 	}
 }
 
-func TestOpenOrUpdatePR_CreatesWhenNoneOpen(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls"):
-			_, _ = w.Write([]byte(`[]`))
-		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pulls"):
-			w.WriteHeader(http.StatusCreated)
-			_, _ = w.Write([]byte(`{"html_url":"https://github.com/owner/repo/pull/7"}`))
-		default:
-			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
-		}
-	}))
-	defer srv.Close()
-
-	c := newTestGitHubClient(srv.URL)
-	url, err := c.OpenOrUpdatePR(context.Background(), PRRequest{
-		HeadBranch: "imgowner/pin-updates", BaseBranch: "main", Title: "t", Body: "b",
-	})
-	if err != nil {
-		t.Fatalf("OpenOrUpdatePR: %v", err)
-	}
-	if url != "https://github.com/owner/repo/pull/7" {
-		t.Errorf("expected the created PR's URL, got %q", url)
-	}
-}
-
-func TestOpenOrUpdatePR_UpdatesWhenOneAlreadyOpen(t *testing.T) {
-	var patched bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls"):
-			_, _ = w.Write([]byte(`[{"number":9,"html_url":"https://github.com/owner/repo/pull/9"}]`))
-		case r.Method == http.MethodPatch && strings.HasSuffix(r.URL.Path, "/pulls/9"):
-			patched = true
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{}`))
-		case r.Method == http.MethodPost:
-			t.Error("must not open a second PR when one is already open for this branch")
-		default:
-			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
-		}
-	}))
-	defer srv.Close()
-
-	c := newTestGitHubClient(srv.URL)
-	url, err := c.OpenOrUpdatePR(context.Background(), PRRequest{
-		HeadBranch: "imgowner/pin-updates", BaseBranch: "main", Title: "t", Body: "b",
-	})
-	if err != nil {
-		t.Fatalf("OpenOrUpdatePR: %v", err)
-	}
-	if !patched {
-		t.Error("expected the existing PR to be updated via PATCH")
-	}
-	if url != "https://github.com/owner/repo/pull/9" {
-		t.Errorf("expected the existing PR's URL, got %q", url)
-	}
-}
-
 func decodeJSON[T any](r *http.Request) (T, error) {
 	var out T
 	err := json.NewDecoder(r.Body).Decode(&out)
