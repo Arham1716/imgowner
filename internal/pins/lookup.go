@@ -121,14 +121,22 @@ func buildLookupScript(mgr string, pins []Pin) (string, error) {
 	case "rpm":
 		// dnf and yum share this query surface; microdnf images usually ship
 		// neither, so fall back through whichever binary exists.
-		b.WriteString(`PM=$(command -v dnf || command -v yum || command -v microdnf); `)
+		//
+		// A package manager left to its defaults retries a dead mirror 10 times
+		// at 30s each, which is longer than the whole lookup is allowed
+		// (pins.lookup_timeout, 5m): one slow mirror then kills the container
+		// and every pin comes back unknown, when a different mirror would have
+		// answered in seconds. Capping the wait per attempt makes it fail over
+		// to the next mirror instead. Seen on a real CI run against Rocky.
+		b.WriteString(`PM=$(command -v dnf || command -v yum || command -v microdnf); ` +
+			`PMOPTS="--setopt=timeout=15 --setopt=retries=2"; `)
 		for _, p := range pins {
 			pkg := sanitizeIdentifier(p.Package)
 			pin := sanitizeVersion(p.Version)
 			// "dnf list available" prints "name.arch  version-release  repo";
 			// take the newest version column for this exact package name.
 			fmt.Fprintf(&b,
-				`LATEST=$($PM -q list available %s 2>/dev/null | awk '$1 ~ /^%s\./ {print $2}' | sort -V | tail -1); `+
+				`LATEST=$($PM -q $PMOPTS list available %s 2>/dev/null | awk '$1 ~ /^%s\./ {print $2}' | sort -V | tail -1); `+
 					`if [ -z "$LATEST" ]; then echo "UNAVAILABLE|%s"; `+
 					`elif [ "$LATEST" != "%s" ]; then echo "UPDATE|%s|%s|$LATEST"; `+
 					`else echo "CURRENT|%s|%s|$LATEST"; fi; `,
