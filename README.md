@@ -102,7 +102,7 @@ Pass `--fail-on-base-mismatch=false` to downgrade that to a warning.
 ## GitHub Action
 
 ```yaml
-- uses: Arham1716/imgowner@v0.1.0
+- uses: Arham1716/imgowner@v0.6.0   # always a release tag
   with:
     image: myapp:${{ github.sha }}
     dockerfile: Dockerfile
@@ -114,6 +114,12 @@ Pass `--fail-on-base-mismatch=false` to downgrade that to a warning.
 
 SARIF output is uploaded to the repository's Security tab, and a single comment
 is kept up to date on the pull request rather than a new one per run.
+
+The action installs the signed imgowner release matching the tag it is pinned
+to (verified with cosign and SHA-256) and the official Trivy release, so pin
+it to a release tag; `@main` is refused unless you also set `version`. All
+inputs are passed to the shell as data, never as script text. On a private
+repository without GitHub Advanced Security, set `upload-sarif: 'false'`.
 
 A complete workflow is in [`examples/github-workflow.yml`](examples/github-workflow.yml).
 
