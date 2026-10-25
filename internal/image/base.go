@@ -42,6 +42,12 @@ func ResolveBase(
 		res.Reason = "no FROM reference could be resolved from the Dockerfile"
 		return res
 	}
+	// FROM scratch is Docker's empty base, not an image to fetch: it
+	// contributes no layers, so every layer belongs to the Dockerfile.
+	if IsScratch(baseRef) {
+		res.Confident = true
+		return res
+	}
 
 	ref := baseRef
 	if digestOverride != "" {
@@ -65,6 +71,11 @@ func ResolveBase(
 	res.LayerCount = count
 	res.Confident = true
 	return res
+}
+
+// IsScratch reports whether ref is Docker's reserved empty base image.
+func IsScratch(ref string) bool {
+	return strings.EqualFold(strings.TrimSpace(ref), "scratch")
 }
 
 // baseMismatchReason turns a layer-prefix failure into guidance the user can act on.
