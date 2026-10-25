@@ -40,6 +40,13 @@ brew install trivy          # macOS
 winget install aquasecurity.trivy   # Windows
 ```
 
+Or run the container image, which bundles Trivy and runs as an unprivileged
+user (UID 10001):
+
+```bash
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" -w /work   ghcr.io/arham1716/imgowner:X ci --image myapp:latest --dockerfile Dockerfile
+```
+
 The `pins` subcommands additionally need Docker or Podman, because package
 versions are resolved by querying the package manager inside the image.
 
