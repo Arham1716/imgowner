@@ -153,7 +153,7 @@ func testFixture(t *testing.T, f fixtureSpec) {
 	cfgPath := writeHistoryConfig(t, histDir)
 
 	out := runImgowner(t, "--config", cfgPath, "attribute", "--image", ref, "--dockerfile", dfPath,
-		"--format", "json", "--base-candidates", "0")
+		"--format", "json", "--output-dir", "-", "--base-candidates", "0")
 
 	var report struct {
 		Digest   string                `json:"digest"`
@@ -698,7 +698,7 @@ func assertNoHistoryOnToolError(t *testing.T, cfgPath, histDir, dfPath string) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, imgownerBin, "--config", cfgPath, "attribute",
 		"--image", registryAddr()+"/imgowner-fixtures/does-not-exist:nope",
-		"--dockerfile", dfPath, "--format", "json", "--base-candidates", "0")
+		"--dockerfile", dfPath, "--format", "json", "--output-dir", "-", "--base-candidates", "0")
 	err := cmd.Run()
 	var ee *exec.ExitError
 	if !errors.As(err, &ee) || ee.ExitCode() != 2 {
