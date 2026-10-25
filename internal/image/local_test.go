@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/google/go-containerregistry/pkg/name"
-	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/random"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
@@ -134,5 +133,4 @@ func TestCheckPlatform(t *testing.T) {
 			t.Errorf("checkPlatform(%q) = %v, want ok=%v", c.platform, err, c.ok)
 		}
 	}
-	var _ v1.Image = img
 }
