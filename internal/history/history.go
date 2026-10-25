@@ -30,8 +30,8 @@ import (
 	"github.com/Arham1716/imgowner/internal/attribution"
 	"github.com/Arham1716/imgowner/internal/baserec"
 	"github.com/Arham1716/imgowner/internal/pins"
-	"github.com/Arham1716/imgowner/internal/securedir"
 	"github.com/Arham1716/imgowner/internal/safeio"
+	"github.com/Arham1716/imgowner/internal/securedir"
 )
 
 // SchemaVersion is bumped when Record changes incompatibly.
