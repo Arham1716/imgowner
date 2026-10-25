@@ -7,7 +7,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/Arham1716/imgowner/internal/config"
 	"github.com/Arham1716/imgowner/internal/dashboard"
 	"github.com/Arham1716/imgowner/internal/history"
 )
@@ -29,7 +28,7 @@ func dashboardCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 			"to open it in a different browser, stop and restart this command.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := config.Load(*cfgPath)
+			cfg, err := readConfig(*cfgPath)
 			if err != nil {
 				return writeStructuredError(structuredScanErr(err))
 			}
