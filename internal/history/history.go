@@ -24,6 +24,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Arham1716/imgowner/internal/attribution"
@@ -167,6 +168,14 @@ func DefaultDir() (string, error) {
 type Store struct {
 	dir string
 	now func() time.Time
+
+	// Records are immutable once written (they are created by an atomic
+	// rename and never modified), so a summary read once never goes stale and
+	// listing a long history only has to open files it has not seen before.
+	// This is what keeps the dashboard inside its speed budget at 90 days of
+	// scans (NFR-17). Entries for deleted records are dropped on each List.
+	mu    sync.Mutex
+	cache map[string]Summary
 }
 
 // Open prepares dir (creating it owner-only) and returns a Store. An empty
@@ -184,8 +193,12 @@ func Open(dir string) (*Store, error) {
 	}
 	// MkdirAll leaves an existing directory's mode alone; tighten one that a
 	// user (or an older version) made group/world accessible. Windows has no
-	// such mode bits -- there %LOCALAPPDATA% already carries a per-user ACL.
-	if runtime.GOOS != "windows" {
+	// mode bits, so there the directory gets an owner-only ACL instead.
+	if runtime.GOOS == "windows" {
+		if err := restrictToOwner(dir); err != nil {
+			return nil, err
+		}
+	} else {
 		info, err := os.Stat(dir)
 		if err != nil {
 			return nil, fmt.Errorf("history: %w", err)
@@ -203,7 +216,7 @@ func Open(dir string) (*Store, error) {
 // judges their age) with now instead of the wall clock. It exists so callers'
 // tests can control time without sleeping.
 func (s *Store) WithClock(now func() time.Time) *Store {
-	return &Store{dir: s.dir, now: now}
+	return &Store{dir: s.dir, now: now} // its own, empty cache
 }
 
 // Dir returns the directory the store uses.
@@ -315,6 +328,14 @@ func (s *Store) List() (summaries []Summary, skipped int, err error) {
 	if err != nil {
 		return nil, 0, fmt.Errorf("history: %w", err)
 	}
+	// One listing at a time: concurrent requests wait for the first to fill
+	// the cache instead of each reading thousands of files.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cache == nil {
+		s.cache = make(map[string]Summary)
+	}
+	present := make(map[string]struct{}, len(entries))
 	for _, e := range entries {
 		id, ok := recordID(e.Name())
 		if !ok {
@@ -324,12 +345,23 @@ func (s *Store) List() (summaries []Summary, skipped int, err error) {
 			skipped++
 			continue
 		}
-		sum, err := s.readSummary(id)
-		if err != nil {
-			skipped++
+		present[id] = struct{}{}
+		if sum, ok := s.cache[id]; ok {
+			summaries = append(summaries, sum)
 			continue
 		}
+		sum, err := s.readSummary(id)
+		if err != nil {
+			skipped++ // not cached: a file still being fixed should be retried
+			continue
+		}
+		s.cache[id] = sum
 		summaries = append(summaries, sum)
+	}
+	for id := range s.cache {
+		if _, ok := present[id]; !ok {
+			delete(s.cache, id)
+		}
 	}
 	sort.Slice(summaries, func(i, j int) bool { return summaries[i].ID > summaries[j].ID })
 	return summaries, skipped, nil

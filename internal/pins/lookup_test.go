@@ -128,3 +128,18 @@ func TestParseLookupOutput_AcceptsRPMUnderscoreVersion(t *testing.T) {
 		t.Errorf("got status=%s available=%q, want current/1.21.1-11.el9_8", got[0].Status, got[0].Available)
 	}
 }
+
+// A package manager's default mirror retries add up to far more than the
+// lookup's own timeout, so one slow mirror used to turn every rpm pin into
+// "unknown". The rpm script must cap the per-attempt wait so it fails over.
+func TestBuildLookupScript_RPMCapsMirrorWaits(t *testing.T) {
+	script, err := buildLookupScript("rpm", []Pin{{Package: "wget", Version: "1.21.1-11.el9_8"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"--setopt=timeout=15", "--setopt=retries=2", "$PM -q $PMOPTS list available wget"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("rpm lookup script is missing %q:\n%s", want, script)
+		}
+	}
+}

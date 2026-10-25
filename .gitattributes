@@ -3,3 +3,7 @@
 # conversion on a contributor's machine.
 web/dashboard/** text eol=lf
 internal/dashboard/dist/** -text
+
+# Shell and Python helpers run on Linux runners; a CRLF would break their shebang lines.
+*.sh text eol=lf
+.github/scripts/** text eol=lf

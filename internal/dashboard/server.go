@@ -136,6 +136,9 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		MaxHeaderBytes:    16 << 10,
 		ErrorLog:          log.New(io.Discard, "", 0),
 	}
+	// Read every record's summary now, in the background, so the first page
+	// load finds a warm cache instead of paying for the whole history.
+	go func() { _, _, _ = s.store.List() }()
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()
 	select {

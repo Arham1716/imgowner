@@ -12,7 +12,9 @@ import (
 	"github.com/Arham1716/imgowner/internal/safeio"
 )
 
-const lookupTimeout = 5 * time.Minute
+// defaultLookupTimeout applies only when the caller set no deadline of its
+// own; the CLI always does, from pins.lookup_timeout (NFR-09).
+const defaultLookupTimeout = 5 * time.Minute
 
 // LookupVersions runs one container per stage to query the available versions
 // of all pinned packages in that stage (FR-14, FR-15).
@@ -23,8 +25,13 @@ func LookupVersions(ctx context.Context, rt Runtime, imageRef string, pins []Pin
 		return pins, nil
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, lookupTimeout)
-	defer cancel()
+	// The caller's deadline (pins.lookup_timeout) wins; a library caller that
+	// set none still gets a bound rather than an unbounded container run.
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultLookupTimeout)
+		defer cancel()
+	}
 
 	// Determine package manager from the first pin (all pins in a stage share one manager).
 	mgr := pins[0].Manager
@@ -46,7 +53,34 @@ func LookupVersions(ctx context.Context, rt Runtime, imageRef string, pins []Pin
 		return pins, &LookupFailedError{Image: imageRef, Runtime: string(rt), Detail: runFailureDetail(err)}
 	}
 
+	return finishLookup(imageRef, rt, pins, out)
+}
+
+// finishLookup turns the lookup container's stdout into pin statuses, or into
+// a LookupFailedError when the script reports that it could not refresh the
+// package index.
+func finishLookup(imageRef string, rt Runtime, pins []Pin, out []byte) ([]Pin, error) {
+	if detail, failed := lookupFailure(out); failed {
+		for i := range pins {
+			pins[i].Status = StatusUnknown
+		}
+		return pins, &LookupFailedError{Image: imageRef, Runtime: string(rt), Detail: detail}
+	}
 	return parseLookupOutput(out, pins), nil
+}
+
+// failedPrefix marks the script's report that it could not refresh the package
+// index, which is a different thing from the package not being in the index.
+const failedPrefix = "FAILED|"
+
+// lookupFailure reports whether the script said it could not refresh the index.
+func lookupFailure(out []byte) (string, bool) {
+	for _, line := range bytes.Split(out, []byte("\n")) {
+		if rest, ok := bytes.CutPrefix(bytes.TrimSpace(line), []byte(failedPrefix)); ok {
+			return string(rest), true
+		}
+	}
+	return "", false
 }
 
 // LookupFailedError reports that the container version lookup for one stage
@@ -89,7 +123,13 @@ func buildLookupScript(mgr string, pins []Pin) (string, error) {
 
 	switch mgr {
 	case "apt":
-		b.WriteString("apt-get update -qq 2>/dev/null; ")
+		// If the index can't be refreshed, say so. Carrying on would let every
+		// "apt-cache madison" come back empty and be reported as UNAVAILABLE --
+		// a claim that the pinned package is gone from the repository, made
+		// when the truth is only that the network failed. The timeouts keep a
+		// slow mirror from using up the whole lookup.
+		b.WriteString(`if ! apt-get update -qq -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=2 >/dev/null 2>&1; ` +
+			`then echo "FAILED|apt-get update could not refresh the package index"; exit 0; fi; `)
 		for _, p := range pins {
 			// Escape package name for shell safety (packages can contain letters, digits, +, -, .).
 			pkg := sanitizeIdentifier(p.Package)
@@ -104,7 +144,8 @@ func buildLookupScript(mgr string, pins []Pin) (string, error) {
 		}
 
 	case "apk":
-		b.WriteString("apk update -q 2>/dev/null; ")
+		b.WriteString(`if ! apk update -q >/dev/null 2>&1; ` +
+			`then echo "FAILED|apk update could not refresh the package index"; exit 0; fi; `)
 		for _, p := range pins {
 			pkg := sanitizeIdentifier(p.Package)
 			pin := sanitizeVersion(p.Version)
@@ -121,14 +162,24 @@ func buildLookupScript(mgr string, pins []Pin) (string, error) {
 	case "rpm":
 		// dnf and yum share this query surface; microdnf images usually ship
 		// neither, so fall back through whichever binary exists.
-		b.WriteString(`PM=$(command -v dnf || command -v yum || command -v microdnf); `)
+		//
+		// A package manager left to its defaults retries a dead mirror 10 times
+		// at 30s each, which is longer than the whole lookup is allowed
+		// (pins.lookup_timeout, 5m): one slow mirror then kills the container
+		// and every pin comes back unknown, when a different mirror would have
+		// answered in seconds. Capping the wait per attempt makes it fail over
+		// to the next mirror instead. Seen on a real CI run against Rocky.
+		b.WriteString(`PM=$(command -v dnf || command -v yum || command -v microdnf); ` +
+			`PMOPTS="--setopt=timeout=15 --setopt=retries=2"; ` +
+			`if ! $PM -q $PMOPTS makecache >/dev/null 2>&1; ` +
+			`then echo "FAILED|the package manager could not refresh its metadata"; exit 0; fi; `)
 		for _, p := range pins {
 			pkg := sanitizeIdentifier(p.Package)
 			pin := sanitizeVersion(p.Version)
 			// "dnf list available" prints "name.arch  version-release  repo";
 			// take the newest version column for this exact package name.
 			fmt.Fprintf(&b,
-				`LATEST=$($PM -q list available %s 2>/dev/null | awk '$1 ~ /^%s\./ {print $2}' | sort -V | tail -1); `+
+				`LATEST=$($PM -q $PMOPTS list available %s 2>/dev/null | awk '$1 ~ /^%s\./ {print $2}' | sort -V | tail -1); `+
 					`if [ -z "$LATEST" ]; then echo "UNAVAILABLE|%s"; `+
 					`elif [ "$LATEST" != "%s" ]; then echo "UPDATE|%s|%s|$LATEST"; `+
 					`else echo "CURRENT|%s|%s|$LATEST"; fi; `,
