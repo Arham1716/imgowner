@@ -305,22 +305,30 @@ func runOrFatal(t *testing.T, cmd *exec.Cmd, what string) {
 
 func runImgowner(t *testing.T, args ...string) []byte {
 	t.Helper()
+	out, _ := runImgownerStderr(t, args...)
+	return out
+}
+
+// runImgownerStderr is runImgowner that also hands back what the binary
+// wrote to stderr, for callers that need to know whether it warned.
+func runImgownerStderr(t *testing.T, args ...string) (stdout, stderr []byte) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, imgownerBin, args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &outBuf, &errBuf
 	err := cmd.Run()
 	// imgowner warns on stderr for non-fatal conditions (e.g. a pin lookup
 	// container failing) and still exits 0; surface it either way so a
 	// resulting "status is unknown" assertion failure isn't a dead end.
-	if stderr.Len() > 0 {
-		t.Logf("imgowner %v stderr:\n%s", args, stderr.String())
+	if errBuf.Len() > 0 {
+		t.Logf("imgowner %v stderr:\n%s", args, errBuf.String())
 	}
 	if err != nil {
 		t.Fatalf("imgowner %v: %v", args, err)
 	}
-	return stdout.Bytes()
+	return outBuf.Bytes(), errBuf.Bytes()
 }
 
 func captureJSON(t *testing.T, name string, args ...string) string {
@@ -561,11 +569,25 @@ func equalStrings(a, b []string) bool {
 
 func assertPin(t *testing.T, f fixtureSpec, dfPath, cfgPath string) {
 	t.Helper()
-	out := runImgowner(t, "--config", cfgPath, "pins", "check", "--dockerfile", dfPath, "--format", "json")
-
+	var out []byte
 	var pinList []pins.Pin
-	if err := json.Unmarshal(out, &pinList); err != nil {
-		t.Fatalf("parsing pins check JSON output: %v\nraw: %s", err, out)
+	// The lookup runs a package manager against the distribution's public
+	// mirrors, which can stall for reasons that have nothing to do with
+	// imgowner (a real CI run lost five minutes to one slow Rocky mirror). When
+	// -- and only when -- imgowner itself reports that the lookup failed, try
+	// once more. A wrong answer, a bad offset or a status that is simply
+	// wrong is never retried.
+	for attempt := 1; ; attempt++ {
+		var stderr []byte
+		out, stderr = runImgownerStderr(t, "--config", cfgPath, "pins", "check", "--dockerfile", dfPath, "--format", "json")
+		pinList = nil
+		if err := json.Unmarshal(out, &pinList); err != nil {
+			t.Fatalf("parsing pins check JSON output: %v\nraw: %s", err, out)
+		}
+		if attempt == 2 || !bytes.Contains(stderr, []byte("pin version lookup")) {
+			break
+		}
+		t.Logf("pin lookup reported a failure (attempt %d); retrying once", attempt)
 	}
 
 	var found *pins.Pin
