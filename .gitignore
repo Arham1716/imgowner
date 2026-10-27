@@ -9,3 +9,6 @@ imgowner-report/
 
 # Local notes and scratch docs; README.md is force-added.
 *.md
+
+# npm dependencies (installed by `npm ci`; never committed)
+node_modules/

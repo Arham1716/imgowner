@@ -784,11 +784,12 @@ func filterNewFindings(
 	runner *scan.Runner,
 	platform string,
 ) ([]attribution.Finding, error) {
-	baseInfo, err := image.Resolve(ctx, baseImageRef, platform)
+	baseInfo, err := image.ResolveAny(ctx, baseImageRef, platform)
 	if err != nil {
 		return nil, err
 	}
-	baseResult, err := runner.Scan(ctx, baseInfo.Ref, baseInfo.Digest)
+	defer func() { _ = baseInfo.Close() }()
+	baseResult, err := pipeline.ScanImage(ctx, runner, baseInfo)
 	if err != nil {
 		return nil, err
 	}
