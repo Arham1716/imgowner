@@ -31,6 +31,7 @@ import (
 	"github.com/Arham1716/imgowner/internal/baserec"
 	"github.com/Arham1716/imgowner/internal/pins"
 	"github.com/Arham1716/imgowner/internal/safeio"
+	"github.com/Arham1716/imgowner/internal/securedir"
 )
 
 // SchemaVersion is bumped when Record changes incompatibly.
@@ -188,26 +189,9 @@ func Open(dir string) (*Store, error) {
 		}
 		dir = d
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("history: creating %s: %w", dir, err)
-	}
-	// MkdirAll leaves an existing directory's mode alone; tighten one that a
-	// user (or an older version) made group/world accessible. Windows has no
-	// mode bits, so there the directory gets an owner-only ACL instead.
-	if runtime.GOOS == "windows" {
-		if err := restrictToOwner(dir); err != nil {
-			return nil, err
-		}
-	} else {
-		info, err := os.Stat(dir)
-		if err != nil {
-			return nil, fmt.Errorf("history: %w", err)
-		}
-		if info.Mode().Perm()&0o077 != 0 {
-			if err := os.Chmod(dir, 0o700); err != nil {
-				return nil, fmt.Errorf("history: %s is accessible to other users and could not be restricted: %w", dir, err)
-			}
-		}
+	// Owner-only (0700 / a protected owner-only ACL), never another user's.
+	if err := securedir.Ensure(dir); err != nil {
+		return nil, fmt.Errorf("history: %w", err)
 	}
 	return &Store{dir: dir, now: time.Now}, nil
 }

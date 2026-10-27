@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"sync"
 	"time"
 
 	"github.com/Arham1716/imgowner/internal/safeio"
@@ -82,8 +84,17 @@ func (r *Runner) ScanArchive(ctx context.Context, archive, digest string) (*Resu
 }
 
 func (r *Runner) scan(ctx context.Context, imageRef, archive, digest string) (*Result, error) {
-	// Check cache first.
-	if cached, err := ReadCache(digest, r.TrivyVersion); err == nil && cached != nil {
+	// A cached result is only reused for the same Trivy version and the same
+	// vulnerability DB; anything else could hide CVEs published since.
+	stamp, err := DBStamp(ctx)
+	if err != nil {
+		warnOnce("scan cache disabled: %v", err)
+	}
+	cached, err := ReadCache(digest, r.TrivyVersion, stamp)
+	if err != nil {
+		warnOnce("scan cache disabled: %v", err)
+	}
+	if cached != nil {
 		var res Result
 		if err := json.Unmarshal(cached, &res); err == nil {
 			return &res, nil
@@ -123,14 +134,31 @@ func (r *Runner) scan(ctx context.Context, imageRef, archive, digest string) (*R
 		return nil, fmt.Errorf("imgowner: trivy scan failed for %s: %w", imageRef, err)
 	}
 
-	// Persist to cache.
-	_ = WriteCache(digest, r.TrivyVersion, raw)
+	// Trivy may have refreshed its DB during this scan, so key the entry on
+	// the DB the scan actually used. A failed write costs the next run a
+	// rescan, never correctness, so it warns rather than fails.
+	if after, err := DBStamp(ctx); err == nil {
+		if err := WriteCache(digest, r.TrivyVersion, after, raw); err != nil {
+			warnOnce("scan result not cached: %v", err)
+		}
+	}
 
 	var res Result
 	if err := json.Unmarshal(raw, &res); err != nil {
 		return nil, fmt.Errorf("imgowner: parsing trivy output: %w", err)
 	}
 	return &res, nil
+}
+
+// warned dedupes warnings: base-image recommendation scans many candidates
+// through one Runner, and the same cache problem should be reported once.
+var warned sync.Map
+
+func warnOnce(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	if _, seen := warned.LoadOrStore(msg, true); !seen {
+		fmt.Fprintln(os.Stderr, "warning: "+msg)
+	}
 }
 
 // trimStderr caps Trivy's stderr so a runaway log cannot flood the error path.
