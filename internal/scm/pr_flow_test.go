@@ -22,7 +22,6 @@ type fakeGitHub struct {
 	pulls    []map[string]any
 	labels   map[string]bool
 	applied  map[int][]string
-	comments []map[string]any
 	commits  int
 }
 
