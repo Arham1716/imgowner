@@ -51,6 +51,11 @@ versions are resolved by querying the package manager inside the image.
 imgowner attribute --image myapp:latest --dockerfile Dockerfile
 ```
 
+The image is read from its registry. An image you have only built locally
+(`docker build -t myapp:latest .`, never pushed) is read from the local Docker
+or Podman image store instead, so you can scan before pushing. The registry
+always wins when it has the tag, so a stale local copy never shadows it.
+
 ### Check whether pinned package versions are stale
 
 ```bash
@@ -81,6 +86,19 @@ imgowner ci --image myapp:${GIT_SHA} --dockerfile Dockerfile \
 
 Exit codes: `0` clean, `1` policy breach, `2` tool or configuration error.
 
+`ci` writes one file per format (`imgowner-report.md`, `.json`, `.sarif`)
+under `--output-dir` (default `report.output_dir`, `./imgowner-report`) and
+lists the paths on stderr. `attribute` does the same, except that a single
+`--format` without `--output-dir` prints to stdout:
+
+```bash
+imgowner attribute --image myapp:latest --format json | jq '.findings | length'
+```
+
+`--format` takes a comma-separated list or can be repeated; an unknown format
+is an error. Several formats never share stdout; `--output-dir -` forces
+stdout for one format.
+
 ## Base image digests
 
 Attribution works by checking that the base image's layers form an exact prefix
@@ -102,7 +120,7 @@ Pass `--fail-on-base-mismatch=false` to downgrade that to a warning.
 ## GitHub Action
 
 ```yaml
-- uses: Arham1716/imgowner@v0.1.0
+- uses: Arham1716/imgowner@v0.6.0   # always a release tag
   with:
     image: myapp:${{ github.sha }}
     dockerfile: Dockerfile
@@ -114,6 +132,12 @@ Pass `--fail-on-base-mismatch=false` to downgrade that to a warning.
 
 SARIF output is uploaded to the repository's Security tab, and a single comment
 is kept up to date on the pull request rather than a new one per run.
+
+The action installs the signed imgowner release matching the tag it is pinned
+to (verified with cosign and SHA-256) and the official Trivy release, so pin
+it to a release tag; `@main` is refused unless you also set `version`. All
+inputs are passed to the shell as data, never as script text. On a private
+repository without GitHub Advanced Security, set `upload-sarif: 'false'`.
 
 A complete workflow is in [`examples/github-workflow.yml`](examples/github-workflow.yml).
 
@@ -223,8 +247,11 @@ port instead of a free one.
 4. Each finding's layer position and package class decide its owner: below the
    boundary is `base`, OS packages above it are `added-os`, language packages
    are `app`.
-5. Scan results are cached by image digest and Trivy version, so repeat runs
-   over an unchanged image skip the scan.
+5. Scan results are cached per user (in the OS cache directory, owner-only)
+   by image digest, Trivy version and vulnerability-DB version, for at most
+   24 hours. A repeat run over an unchanged image skips the scan, but as soon
+   as Trivy's DB updates the image is scanned again, so newly published CVEs
+   are reported.
 
 ## Limitations
 

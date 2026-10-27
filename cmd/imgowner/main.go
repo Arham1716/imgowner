@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -36,9 +37,12 @@ var (
 )
 
 // exitError carries a specific OS exit code through cobra's error path.
+// reported is true when the error has already been written to stderr (as a
+// structured JSON error), so main must not print it a second time.
 type exitError struct {
-	code  int
-	cause error
+	code     int
+	cause    error
+	reported bool
 }
 
 func (e *exitError) Error() string { return e.cause.Error() }
@@ -49,11 +53,18 @@ func main() {
 	defer stop()
 
 	if err := rootCmd(ctx).ExecuteContext(ctx); err != nil {
+		// Cobra's own messages are silenced (SilenceErrors) so that structured
+		// errors aren't followed by a duplicate; everything not yet reported
+		// is printed here. A failure must never exit with nothing on stderr.
 		var ee *exitError
 		if errors.As(err, &ee) {
+			if !ee.reported {
+				fmt.Fprintf(os.Stderr, "imgowner: %v\n", ee.cause)
+			}
 			os.Exit(ee.code)
 		}
-		os.Exit(2) // generic tool/config error
+		fmt.Fprintf(os.Stderr, "imgowner: %v\nRun 'imgowner --help' for usage.\n", err)
+		os.Exit(2) // generic tool/config error (unknown flag, unknown command, ...)
 	}
 }
 
@@ -83,6 +94,11 @@ func rootCmd(ctx context.Context) *cobra.Command {
 		SilenceErrors: true,
 	}
 	root.PersistentFlags().StringVar(&cfgPath, "config", ".imgowner.yaml", "config file path")
+	// An explicitly named --config must exist; only the default path may be
+	// absent (a project without a config file runs on built-in defaults).
+	root.PersistentPreRun = func(cmd *cobra.Command, _ []string) {
+		cfgExplicit = cmd.Flags().Changed("config")
+	}
 	root.Version = fmt.Sprintf("%s (commit %s, built %s)", version, commit, date)
 	root.SetVersionTemplate("imgowner {{.Version}}\n")
 
@@ -95,10 +111,22 @@ func rootCmd(ctx context.Context) *cobra.Command {
 	return root
 }
 
+// cfgExplicit records whether --config was given on the command line.
+var cfgExplicit bool
+
+// readConfig loads the config file: required when named with --config,
+// optional at the default path.
+func readConfig(path string) (config.Config, error) {
+	if cfgExplicit {
+		return config.LoadRequired(path)
+	}
+	return config.Load(path)
+}
+
 // loadConfig reads and validates the config file, then checks Trivy version.
 // Returns the config and the resolved Trivy version string.
 func loadConfig(ctx context.Context, cfgPath string) (config.Config, string, error) {
-	cfg, err := config.Load(cfgPath)
+	cfg, err := readConfig(cfgPath)
 	if err != nil {
 		return config.Config{}, "", err
 	}
@@ -119,8 +147,10 @@ func loadConfig(ctx context.Context, cfgPath string) (config.Config, string, err
 // writeStructuredError writes a JSON error to stderr and returns an exitError
 // with code 2 so the process exits with the correct tool-error code.
 func writeStructuredError(payload any) error {
-	_ = json.NewEncoder(os.Stderr).Encode(payload)
-	return toolErr(fmt.Errorf("tool error"))
+	if err := json.NewEncoder(os.Stderr).Encode(payload); err != nil {
+		return toolErr(fmt.Errorf("%v (and writing the error failed: %w)", payload, err))
+	}
+	return &exitError{code: 2, cause: fmt.Errorf("tool error"), reported: true}
 }
 
 // ── attribute ────────────────────────────────────────────────────────────────
@@ -131,6 +161,7 @@ func attributeCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 		dockerfilePath string
 		baseDigest     string
 		formats        []string
+		outputDir      string
 		baseCandidates int
 	)
 
@@ -163,6 +194,12 @@ func attributeCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 			if err != nil {
 				return writeStructuredError(structuredScanErr(err))
 			}
+			// Settled before the scan, so a bad --format fails in a second,
+			// not after a ten-minute scan.
+			fmts, outDir, err := reportTarget(formats, outputDir, cfg, true)
+			if err != nil {
+				return writeStructuredError(map[string]string{"error": err.Error()})
+			}
 
 			n := cfg.Scan.BaseCandidates
 			if baseCandidates > 0 {
@@ -183,17 +220,21 @@ func attributeCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 			}
 			warnAboutAttribution(res)
 
-			// Write reports (FR-21, FR-22, FR-23).
-			if err := report.Write(report.Request{
+			// Write reports (FR-28): one file per format, or one format on stdout.
+			written, err := report.Write(report.Request{
 				Image:      imageRef,
 				Digest:     res.Digest,
 				BaseRef:    res.BaseRef,
 				Findings:   res.Findings,
 				Candidates: res.Candidates,
-				Formats:    formats,
-			}); err != nil {
+				Formats:    fmts,
+				OutputDir:  outDir,
+				Dockerfile: dockerfilePath,
+			})
+			if err != nil {
 				return writeStructuredError(map[string]string{"error": err.Error()})
 			}
+			announce(written)
 			recordHistory(cfg, history.Input{
 				Command:    "attribute",
 				Image:      imageRef,
@@ -210,7 +251,8 @@ func attributeCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 	cmd.Flags().StringVar(&imageRef, "image", "", "image reference to scan (required)")
 	cmd.Flags().StringVar(&dockerfilePath, "dockerfile", "Dockerfile", "path to Dockerfile")
 	cmd.Flags().StringVar(&baseDigest, "base-digest", "", "override base image digest")
-	cmd.Flags().StringArrayVar(&formats, "format", []string{"md", "json"}, "output formats (md,json,sarif)")
+	cmd.Flags().StringArrayVar(&formats, "format", nil, "report formats, comma-separated or repeated (md,json,sarif); overrides report.formats")
+	cmd.Flags().StringVar(&outputDir, "output-dir", "", "directory for report files (default: stdout for a single --format, else report.output_dir); '-' forces stdout")
 	cmd.Flags().IntVar(&baseCandidates, "base-candidates", 0, "override base_candidates from config")
 	return cmd
 }
@@ -221,6 +263,15 @@ func pinsCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 	pins := &cobra.Command{
 		Use:   "pins",
 		Short: "Check and update pinned OS packages in Dockerfiles",
+		// Without RunE cobra prints help and exits 0 for `pins frobnicate`,
+		// so a typo in a CI script would pass silently.
+		Args: cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 0 {
+				return toolErr(fmt.Errorf("unknown command %q for %q (use check or update)", args[0], cmd.CommandPath()))
+			}
+			return cmd.Help()
+		},
 	}
 	pins.AddCommand(pinsCheckCmd(ctx, cfgPath))
 	pins.AddCommand(pinsUpdateCmd(ctx, cfgPath))
@@ -263,6 +314,7 @@ func pinsCheckCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 			if err != nil {
 				return writeStructuredError(map[string]string{"error": err.Error()})
 			}
+			warnUnlookupable(pinList)
 			pinsImage := imageRef
 			if pinsImage == "" {
 				if final := df.FinalStage(); final != nil {
@@ -325,28 +377,23 @@ func runPinLookup(
 	imageRefOverride string,
 	cfg config.Config,
 ) ([]pins.Pin, error) {
-	// Group by stage name.
+	// Group by stage index: grouping by name put every unnamed stage into one
+	// group and looked them all up in the first one's image.
 	type group struct {
 		ref  string
 		idxs []int
 	}
-	groups := make(map[string]*group)
+	groups := make(map[int]*group)
 	for i, p := range pinList {
-		if groups[p.Stage] == nil {
-			// Resolve the base image ref for this stage.
+		if groups[p.StageIndex] == nil {
 			ref := imageRefOverride
-			if ref == "" {
-				for _, s := range df.Stages {
-					if s.Name == p.Stage {
-						ref = df.ResolveBaseRef(&s)
-						break
-					}
-				}
+			if ref == "" && p.StageIndex >= 0 && p.StageIndex < len(df.Stages) {
+				ref = df.ResolveBaseRef(&df.Stages[p.StageIndex])
 			}
 			// No ref resolved — skip this stage (best effort).
-			groups[p.Stage] = &group{ref: ref}
+			groups[p.StageIndex] = &group{ref: ref}
 		}
-		groups[p.Stage].idxs = append(groups[p.Stage].idxs, i)
+		groups[p.StageIndex].idxs = append(groups[p.StageIndex].idxs, i)
 	}
 
 	for _, g := range groups {
@@ -376,18 +423,30 @@ func runPinLookup(
 	return pinList, nil
 }
 
+// warnUnlookupable prints why each variable or unsupported pin is skipped
+// (FR-13, FR-14), on stderr so --format json output stays clean.
+func warnUnlookupable(pinList []pins.Pin) {
+	for _, p := range pinList {
+		if !p.Lookupable() && p.Note != "" {
+			fmt.Fprintf(os.Stderr, "warning: %s (line %d) not checked: %s\n", p.Package, p.Line, p.Note)
+		}
+	}
+}
+
 func printPinsSummary(pinList []pins.Pin) {
 	counts := map[pins.Status]int{}
 	for _, p := range pinList {
 		counts[p.Status]++
 	}
 	fmt.Printf("Pinned packages: %d\n", len(pinList))
-	fmt.Printf("  current=%d  update-available=%d  fixes-CVE(s)=%d  unavailable=%d  unknown=%d\n",
+	fmt.Printf("  current=%d  update-available=%d  fixes-CVE(s)=%d  unavailable=%d  unknown=%d  variable=%d  unsupported=%d\n",
 		counts[pins.StatusCurrent],
 		counts[pins.StatusUpdateAvailable],
 		counts[pins.StatusFixesCVEs],
 		counts[pins.StatusUnavailable],
 		counts[pins.StatusUnknown],
+		counts[pins.StatusVariable],
+		counts[pins.StatusUnsupported],
 	)
 	for _, p := range pinList {
 		switch p.Status {
@@ -396,7 +455,13 @@ func printPinsSummary(pinList []pins.Pin) {
 		case pins.StatusFixesCVEs:
 			fmt.Printf("  FIX-CVE  %-30s %s → %s (line %d) [%d CVE(s)]\n", p.Package, p.Version, p.Available, p.Line, len(p.FixesCVEs))
 		case pins.StatusUnavailable:
-			fmt.Printf("  MISSING  %-30s %s (line %d)\n", p.Package, p.Version, p.Line)
+			if p.Available != "" {
+				fmt.Printf("  MISSING  %-30s %s → %s (line %d) [pinned version left the repository]\n", p.Package, p.Version, p.Available, p.Line)
+			} else {
+				fmt.Printf("  MISSING  %-30s %s (line %d) [package not in the repository: manual action]\n", p.Package, p.Version, p.Line)
+			}
+		case pins.StatusVariable, pins.StatusUnsupported:
+			fmt.Printf("  SKIPPED  %-30s %s (line %d) [%s]\n", p.Package, p.Version, p.Line, p.Note)
 		case pins.StatusCurrent:
 			fmt.Printf("  OK       %-30s %s (line %d)\n", p.Package, p.Version, p.Line)
 		default:
@@ -445,6 +510,7 @@ func pinsUpdateCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 				fmt.Println("No pinned OS packages found.")
 				return nil
 			}
+			warnUnlookupable(pinList)
 
 			rt, err := pins.DetectRuntime(ctx)
 			if err != nil {
@@ -503,12 +569,42 @@ func pinsUpdateCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 
 func buildPinsPRBody(pinList []pins.Pin) string {
 	var sb strings.Builder
-	sb.WriteString("## Pinned OS package updates\n\n")
-	sb.WriteString("| Package | Old | New | Status |\n|---|---|---|---|\n")
+	var updates, bumped, manual []pins.Pin
 	for _, p := range pinList {
-		if p.Status == pins.StatusUpdateAvailable || p.Status == pins.StatusFixesCVEs {
+		switch {
+		case p.Status == pins.StatusUpdateAvailable || p.Status == pins.StatusFixesCVEs:
+			updates = append(updates, p)
+		case p.Status == pins.StatusUnavailable && p.Available != "":
+			bumped = append(bumped, p)
+		case p.Status == pins.StatusUnavailable:
+			manual = append(manual, p)
+		}
+	}
+	sb.WriteString("## Pinned OS package updates\n\n")
+	if len(updates) > 0 {
+		sb.WriteString("| Package | Old | New | Status |\n|---|---|---|---|\n")
+		for _, p := range updates {
 			fmt.Fprintf(&sb, "| %s | %s | %s | %s |\n", p.Package, p.Version, p.Available, p.Status)
 		}
+		sb.WriteString("\n")
+	}
+	if len(bumped) > 0 {
+		// FR-18
+		sb.WriteString("### Unavailable pins bumped\n\nPreviously unavailable — the build would have failed with these pins.\n\n")
+		sb.WriteString("| Package | Old (gone) | New |\n|---|---|---|\n")
+		for _, p := range bumped {
+			fmt.Fprintf(&sb, "| %s | %s | %s |\n", p.Package, p.Version, p.Available)
+		}
+		sb.WriteString("\n")
+	}
+	if len(manual) > 0 {
+		// FR-19
+		sb.WriteString("### Requires manual action\n\nThese packages are no longer in the OS repository at all; their pins were left unchanged.\n\n")
+		sb.WriteString("| Package | Last pinned version | Line |\n|---|---|---|\n")
+		for _, p := range manual {
+			fmt.Fprintf(&sb, "| %s | %s | %d |\n", p.Package, p.Version, p.Line)
+		}
+		sb.WriteString("\n")
 	}
 	return sb.String()
 }
@@ -547,6 +643,10 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 			cfg, trivyVer, err := loadConfig(ctx, *cfgPath)
 			if err != nil {
 				return writeStructuredError(structuredScanErr(err))
+			}
+			fmts, outDir, err := reportTarget(formats, outputDir, cfg, false)
+			if err != nil {
+				return writeStructuredError(map[string]string{"error": err.Error()})
 			}
 
 			// FR-25: new_only requires --base-image-ref (F1 gate).
@@ -591,22 +691,24 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 					Platform:     cfg.Scan.Platform,
 					Timeout:      cfg.Scan.Timeout(),
 				}
-				findings = filterNewFindings(ctx, findings, baseImageRef, runner, cfg.Scan.Platform)
+				findings, err = filterNewFindings(ctx, findings, baseImageRef, runner, cfg.Scan.Platform)
+				if err != nil {
+					// Failing open here would report every existing CVE as new;
+					// failing closed says exactly what went wrong.
+					return writeStructuredError(map[string]string{
+						"error": "new_only baseline could not be scanned",
+						"ref":   baseImageRef,
+						"cause": err.Error(),
+						"hint":  "check --base-image-ref, or turn policy.new_only off for this run",
+					})
+				}
 			}
 
 			// ── Policy evaluation (FR-27) ─────────────────────────────────
-			exitCode := evaluatePolicy(findings, cfg)
+			breaching := evaluatePolicy(findings, cfg)
 
-			// ── Report writing (FR-21, FR-22, FR-23) ─────────────────────
-			fmts := formats
-			if len(fmts) == 0 {
-				fmts = cfg.Report.Formats
-			}
-			outDir := outputDir
-			if outDir == "" {
-				outDir = cfg.Report.OutputDir
-			}
-			if err := report.Write(report.Request{
+			// ── Report writing (FR-28) ────────────────────────────────────
+			written, err := report.Write(report.Request{
 				Image:      imageRef,
 				Digest:     res.Digest,
 				BaseRef:    baseRef,
@@ -614,9 +716,12 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 				Candidates: candidates,
 				OutputDir:  outDir,
 				Formats:    fmts,
-			}); err != nil {
+				Dockerfile: dockerfilePath,
+			})
+			if err != nil {
 				return writeStructuredError(map[string]string{"error": err.Error()})
 			}
+			announce(written)
 			// Recorded before the policy verdict is returned: a breach (exit 1)
 			// is a completed scan and belongs in the history too (FR-31).
 			recordHistory(cfg, history.Input{
@@ -642,13 +747,15 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 						Findings:   findings,
 						Candidates: candidates,
 						Formats:    []string{"md"},
+						Dockerfile: dockerfilePath,
 					})
 					_ = client.EnsureComment(ctx, prID, commentBuf.String())
 				}
 			}
 
-			if exitCode != 0 {
-				return policyErr(fmt.Errorf("policy breach: %d finding(s) at or above configured fail_on threshold", len(findings)))
+			if breaching > 0 {
+				return policyErr(fmt.Errorf("policy breach: %d finding(s) at or above policy.fail_on %v owned by %s",
+					breaching, cfg.Policy.FailOn, enforcedOwners(cfg)))
 			}
 			return nil
 		},
@@ -657,12 +764,49 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 	cmd.Flags().StringVar(&baseImageRef, "base-image-ref", "", "baseline image ref for new_only diff")
 	cmd.Flags().StringVar(&baseDigest, "base-digest", "", "digest of the base image used at build time (sha256:...)")
 	cmd.Flags().StringVar(&dockerfilePath, "dockerfile", "Dockerfile", "path to Dockerfile")
-	cmd.Flags().StringArrayVar(&formats, "format", nil, "output formats (md,json,sarif); overrides config")
-	cmd.Flags().StringVar(&outputDir, "output-dir", "", "directory for report files; overrides config")
+	cmd.Flags().StringArrayVar(&formats, "format", nil, "report formats, comma-separated or repeated (md,json,sarif); overrides report.formats")
+	cmd.Flags().StringVar(&outputDir, "output-dir", "", "directory for report files (default report.output_dir); '-' writes a single format to stdout")
 	cmd.Flags().StringVar(&prID, "pr-id", "", "PR number/ID to post attribution comment on")
 	cmd.Flags().BoolVar(&failOnBaseMismatch, "fail-on-base-mismatch", true,
 		"exit with an error when the base image boundary cannot be verified")
 	return cmd
+}
+
+// reportTarget resolves the formats and output directory from flags over
+// config, validating them before any scan runs.
+//
+// singleToStdout keeps attribute's long-standing behaviour: one format named
+// with --format and no --output-dir prints to stdout, which scripts and the
+// released VS Code extension (`attribute --format json`) parse. Several
+// formats never share stdout; they go to files (FR-28).
+func reportTarget(flagFormats []string, flagDir string, cfg config.Config, singleToStdout bool) ([]string, string, error) {
+	src := flagFormats
+	if len(src) == 0 {
+		src = cfg.Report.Formats
+	}
+	fmts, err := report.ParseFormats(src)
+	if err != nil {
+		return nil, "", err
+	}
+	dir := flagDir
+	if dir == "" {
+		dir = cfg.Report.OutputDir
+		if singleToStdout && len(flagFormats) > 0 && len(fmts) == 1 {
+			dir = report.Stdout
+		}
+	}
+	if dir == report.Stdout && len(fmts) > 1 {
+		return nil, "", fmt.Errorf("--output-dir - writes to stdout, which holds one format; got %s", strings.Join(fmts, ", "))
+	}
+	return fmts, dir, nil
+}
+
+// announce tells the user (on stderr, keeping stdout clean) where the
+// reports went.
+func announce(paths []string) {
+	for _, p := range paths {
+		fmt.Fprintf(os.Stderr, "wrote %s\n", p)
+	}
 }
 
 // warnAboutAttribution prints a single actionable warning when attribution had
@@ -686,8 +830,16 @@ func warnAboutAttribution(res *pipeline.AttributeResult) {
 	}
 }
 
+// enforcedOwners describes policy.enforce_owners for the breach message.
+func enforcedOwners(cfg config.Config) string {
+	if len(cfg.Policy.EnforceOwners) == 0 {
+		return "any owner"
+	}
+	return strings.Join(cfg.Policy.EnforceOwners, ", ")
+}
+
 // evaluatePolicy checks findings against fail_on severities and enforce_owners
-// (FR-27). Returns 0 (success) or 1 (policy breach).
+// (FR-27). Returns the number of breaching findings; 0 means the policy passed.
 func evaluatePolicy(findings []attribution.Finding, cfg config.Config) int {
 	failSev := make(map[string]bool, len(cfg.Policy.FailOn))
 	for _, s := range cfg.Policy.FailOn {
@@ -702,6 +854,7 @@ func evaluatePolicy(findings []attribution.Finding, cfg config.Config) int {
 		enforceSet[strings.ToLower(o)] = true
 	}
 
+	breaching := 0
 	for _, f := range findings {
 		if !failSev[strings.ToUpper(f.Severity)] {
 			continue
@@ -710,28 +863,29 @@ func evaluatePolicy(findings []attribution.Finding, cfg config.Config) int {
 		if len(enforceSet) > 0 && !enforceSet[strings.ToLower(string(f.Owner))] {
 			continue
 		}
-		return 1
+		breaching++
 	}
-	return 0
+	return breaching
 }
 
 // filterNewFindings scans baseImageRef and returns only findings whose CVE ID
-// is NOT present in the baseline scan (FR-25 new_only mode).
+// is NOT present in the baseline scan (FR-25 new_only mode). A baseline that
+// can't be resolved or scanned is an error, never "everything is new".
 func filterNewFindings(
 	ctx context.Context,
 	findings []attribution.Finding,
 	baseImageRef string,
 	runner *scan.Runner,
 	platform string,
-) []attribution.Finding {
-	baseInfo, err := image.Resolve(ctx, baseImageRef, platform)
+) ([]attribution.Finding, error) {
+	baseInfo, err := image.ResolveAny(ctx, baseImageRef, platform)
 	if err != nil {
-		// Can't reach baseline — return all findings (fail open, not closed).
-		return findings
+		return nil, err
 	}
-	baseResult, err := runner.Scan(ctx, baseInfo.Ref, baseInfo.Digest)
+	defer func() { _ = baseInfo.Close() }()
+	baseResult, err := pipeline.ScanImage(ctx, runner, baseInfo)
 	if err != nil {
-		return findings
+		return nil, err
 	}
 
 	// Build CVE set present in the baseline image.
@@ -742,13 +896,13 @@ func filterNewFindings(
 		}
 	}
 
-	var newOnly []attribution.Finding
+	newOnly := []attribution.Finding{}
 	for _, f := range findings {
 		if !baselineCVEs[f.CVE] {
 			newOnly = append(newOnly, f)
 		}
 	}
-	return newOnly
+	return newOnly, nil
 }
 
 // structuredErr converts known error types to a JSON-serialisable map.
@@ -777,6 +931,8 @@ func structuredScanErr(err error) map[string]string {
 			"host":  e.Host,
 			"hint":  "authenticate with `docker login " + e.Host + "` or lower scan.base_candidates",
 		}
+	case *config.ErrUnknownKey:
+		return map[string]string{"error": "unknown config key", "key": e.Key, "line": strconv.Itoa(e.Line)}
 	case *config.ErrInvalidConfig:
 		return map[string]string{"error": "invalid config", "key": e.Key, "reason": e.Reason}
 	case *image.ErrRegistryUnreachable:

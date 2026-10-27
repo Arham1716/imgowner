@@ -334,6 +334,81 @@ jobs:
           REALIMAGE_REGISTRY: localhost:5000
         run: go test -tags realimage -timeout 25m ./test/realimage/...
 
+  # The published GitHub Action (action.yml), run the way users run it. It
+  # installs the latest signed release (the action's own code is what this
+  # PR changes), scans a real image, and must keep hostile inputs as data.
+  action:
+    name: GitHub Action
+    runs-on: ubuntu-latest
+    services:
+      registry:
+        image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+        ports:
+          - 5000:5000
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build a fixture image
+        run: |
+          mkdir -p "$RUNNER_TEMP/fx"
+          printf 'FROM alpine:3.20\nRUN apk add --no-cache curl\n' > "$RUNNER_TEMP/fx/Dockerfile"
+          printf 'version: 1\npolicy:\n  fail_on: []\n' > "$RUNNER_TEMP/fx/imgowner.yaml"
+          docker build -q -t localhost:5000/fx:ci "$RUNNER_TEMP/fx"
+          docker push -q localhost:5000/fx:ci
+
+      - id: scan
+        uses: ./
+        with:
+          version: 0.5.0
+          image: localhost:5000/fx:ci
+          dockerfile: ${{ runner.temp }}/fx/Dockerfile
+          config: ${{ runner.temp }}/fx/imgowner.yaml
+          output-dir: action-report
+          upload-sarif: 'false'
+
+      - name: The action produced a real report
+        env:
+          COUNT: ${{ steps.scan.outputs.findings-count }}
+        run: |
+          test -s action-report/imgowner-report.json
+          test -s action-report/imgowner-report.sarif
+          test -n "$COUNT"
+          test "$COUNT" = "$(jq '.findings | length' action-report/imgowner-report.json)"
+
+      # The payloads only create marker files; the inputs must reach imgowner
+      # as plain strings and never run.
+      - id: hostile
+        continue-on-error: true
+        uses: ./
+        with:
+          version: 0.5.0
+          image: 'alpine:3.20"; touch /tmp/injected-image; echo "'
+          dockerfile: 'Dockerfile"; touch /tmp/injected-dockerfile; echo "'
+          pr-id: '1; touch /tmp/injected-pr'
+          format: 'md,$(touch /tmp/injected-format)'
+          output-dir: hostile-report
+          upload-sarif: 'false'
+
+      - name: Hostile inputs did not execute
+        run: |
+          for f in /tmp/injected-image /tmp/injected-dockerfile /tmp/injected-pr /tmp/injected-format; do
+            if [ -e "$f" ]; then echo "::error::input injection: $f was created"; exit 1; fi
+          done
+
+      # Unpinned use must fail loudly rather than install something unverified.
+      - id: unpinned
+        continue-on-error: true
+        uses: ./
+        with:
+          image: localhost:5000/fx:ci
+          dockerfile: ${{ runner.temp }}/fx/Dockerfile
+          upload-sarif: 'false'
+
+      - name: Unpinned use was refused
+        run: test "${{ steps.unpinned.outcome }}" = failure
+
   # FR-46: every parser of untrusted input is fuzzed on every PR. A crash
   # fails the job and the crashing input is kept as an artifact.
   fuzz:

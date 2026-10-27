@@ -2,14 +2,15 @@ package pins
 
 import (
 	"bytes"
+	"regexp"
 	"strings"
 
 	"github.com/Arham1716/imgowner/internal/dockerfile"
 )
 
 // Extract parses all RUN instructions in the Dockerfile and returns one Pin per
-// exact-pinned OS package found in apt-get/apt/apk install|add invocations
-// (Story 2.1, FR-12). content is the raw Dockerfile bytes.
+// exact-pinned OS package found in apt-get/apt/apk/dnf/yum/microdnf install
+// invocations (Story 2.1, FR-12). content is the raw Dockerfile bytes.
 // ignorePackages is the list from config.Pins.IgnorePackages; matching pins
 // are silently skipped.
 func Extract(content []byte, df *dockerfile.File, ignorePackages ...string) ([]Pin, error) {
@@ -21,17 +22,22 @@ func Extract(content []byte, df *dockerfile.File, ignorePackages ...string) ([]P
 	var pins []Pin
 
 	for _, stage := range df.Stages {
-		// Collect stage-level ARG defaults (merged with global defaults).
-		stageArgs := collectStageArgs(&stage, df.Args)
 		thirdParty := detectThirdPartyRepos(&stage)
+		vars := newStageVars(df.Args)
 
 		for _, instr := range stage.Lines {
-			if !strings.EqualFold(instr.Command, "RUN") {
+			switch strings.ToUpper(instr.Command) {
+			case "ARG", "ENV":
+				vars.record(instr)
+				continue
+			case "RUN":
+			default:
 				continue
 			}
 			found := extractFromRun(instr.Args, instr.Line, content, lineOffsets, stage.Name)
 			for i := range found {
-				classifyPin(&found[i], stageArgs, thirdParty)
+				found[i].StageIndex = stage.Index
+				classifyPin(&found[i], vars, thirdParty, content, lineOffsets)
 			}
 			for _, p := range found {
 				if !ignoreSet[p.Package] {
@@ -43,100 +49,174 @@ func Extract(content []byte, df *dockerfile.File, ignorePackages ...string) ([]P
 	return pins, nil
 }
 
-// collectStageArgs merges global ARG defaults with any ARG instructions inside
-// the stage itself. Stage-level ARGs shadow global ones.
-func collectStageArgs(stage *dockerfile.Stage, globalArgs map[string]string) map[string]string {
-	merged := make(map[string]string, len(globalArgs))
-	for k, v := range globalArgs {
-		merged[k] = v
-	}
-	for _, instr := range stage.Lines {
-		if !strings.EqualFold(instr.Command, "ARG") {
-			continue
-		}
-		if k, v, hasDefault := parseARGLine(instr.Args); hasDefault {
-			merged[k] = v
-		} else if _, exists := merged[k]; !exists {
-			merged[k] = "" // no default
-		}
-	}
-	return merged
+// stageVars tracks the ARG and ENV values in scope at each point of a stage,
+// in Dockerfile order, so a pin sees only the variables defined above it.
+type stageVars struct {
+	values map[string]string // name -> value ("" = declared without a default)
 }
 
-// parseARGLine splits "KEY=VALUE" or "KEY" (mirrors dockerfile.parseARG).
-func parseARGLine(s string) (key, value string, hasDefault bool) {
-	if idx := strings.IndexByte(s, '='); idx >= 0 {
-		return strings.TrimSpace(s[:idx]), strings.TrimSpace(s[idx+1:]), true
+func newStageVars(globalArgs map[string]string) *stageVars {
+	v := &stageVars{values: make(map[string]string, len(globalArgs))}
+	for k, val := range globalArgs {
+		v.values[k] = val
 	}
-	return strings.TrimSpace(s), "", false
+	return v
 }
 
-// detectThirdPartyRepos returns true if the stage adds a custom apt/apk
-// repository source before its install commands, marking all apt-pinned packages
-// in that stage as potentially unsupported (best-effort heuristic).
-func detectThirdPartyRepos(stage *dockerfile.Stage) bool {
-	thirdParty3PIndicators := []string{
-		"add-apt-repository",
-		"apt-key add",
-		"sources.list.d",
-		"apk add --repository",
-		"--repositories-file",
+// record applies one ARG or ENV instruction. ENV accepts "KEY=VALUE ..." and
+// the legacy "KEY VALUE" form; a stage ARG without a default keeps a global
+// default (as `docker build` does).
+func (v *stageVars) record(instr dockerfile.Instruction) {
+	// The parser's Args for ENV is its own "KEY VALUE =" node rendering, so
+	// read the instruction as written instead.
+	args := strings.TrimSpace(instr.Raw)
+	if kw, rest, ok := strings.Cut(args, " "); ok && strings.EqualFold(kw, instr.Command) {
+		args = strings.TrimSpace(rest)
+	} else {
+		args = strings.TrimSpace(instr.Args)
 	}
+	fields := strings.Fields(args)
+	if len(fields) == 0 {
+		return
+	}
+	if strings.EqualFold(instr.Command, "ENV") && !strings.Contains(fields[0], "=") {
+		if k, val, ok := strings.Cut(args, " "); ok {
+			v.values[strings.TrimSpace(k)] = unquote(strings.TrimSpace(val))
+		}
+		return
+	}
+	for _, field := range fields {
+		k, val, hasDefault := strings.Cut(field, "=")
+		if hasDefault {
+			v.values[k] = unquote(val)
+		} else if _, exists := v.values[k]; !exists {
+			v.values[k] = ""
+		}
+	}
+}
+
+func unquote(s string) string {
+	if len(s) >= 2 && (s[0] == '"' || s[0] == '\'') && s[len(s)-1] == s[0] {
+		return s[1 : len(s)-1]
+	}
+	return s
+}
+
+// thirdPartyIndicators are the shell fragments that add a package source
+// other than the image's own OS repositories (FR-14). The first match is
+// reported to the user as the reason.
+var thirdPartyIndicators = []string{
+	"add-apt-repository",
+	"apt-key add",
+	"/etc/apt/sources.list",
+	"sources.list.d",
+	"signed-by=",
+	"apk add --repository",
+	"--repository ",
+	"--repository=",
+	"/etc/apk/repositories",
+	"--repositories-file",
+	"config-manager --add-repo",
+	"yum-config-manager",
+	"/etc/yum.repos.d",
+	"--enablerepo",
+	"--repofrompath",
+}
+
+// detectThirdPartyRepos returns the indicator found if the stage adds a
+// package source of its own, or "" (best-effort heuristic): the image's OS
+// repository can't tell us anything about such a package's versions.
+func detectThirdPartyRepos(stage *dockerfile.Stage) string {
 	for _, instr := range stage.Lines {
 		if !strings.EqualFold(instr.Command, "RUN") {
 			continue
 		}
 		lower := strings.ToLower(instr.Args)
-		for _, indicator := range thirdParty3PIndicators {
+		for _, indicator := range thirdPartyIndicators {
 			if strings.Contains(lower, indicator) {
-				return true
+				return strings.TrimSpace(indicator)
 			}
 		}
 	}
-	return false
+	return ""
 }
 
-// classifyPin sets StatusVariable or StatusUnsupported when applicable,
-// and resolves ARG-expanded versions where a default exists.
-func classifyPin(p *Pin, stageArgs map[string]string, thirdParty bool) {
-	ver := p.Version
-	if isARGRef(ver) {
-		varName := argVarName(ver)
-		if def, ok := stageArgs[varName]; ok && def != "" {
-			// ARG has a default — resolve it so the version can be looked up.
-			// The resolved text lives on the ARG line, not at the RUN-line
-			// offset found for "${VAR}", so that offset no longer points at
-			// p.Version. Left as is, ApplyEdits rejects the mismatch and the
-			// whole pins update fails; -1 makes PlanEdits skip just this pin.
-			p.Version = def
-			p.ByteOffset = -1
-		} else {
-			// ARG-only with no default — cannot look up.
+// classifyPin resolves ARG/ENV-expanded versions (FR-13) and marks pins that
+// can't be looked up: StatusVariable when the variable has no value, and
+// StatusUnsupported when the stage adds a third-party source (FR-14). Both
+// keep their status through lookup and are never edited.
+func classifyPin(p *Pin, vars *stageVars, thirdParty string, content []byte, lineOffsets []int) {
+	if name, ok := varRef(p.Version); ok {
+		def := vars.values[name]
+		if def == "" {
 			p.Status = StatusVariable
+			p.Note = "version comes from $" + name + ", which has no default; pass it at build time"
+			p.ByteOffset = -1
+			return
 		}
-		return
+		// The editable text is the variable's value on its ARG/ENV line, not
+		// the "${VAR}" on the RUN line.
+		p.Version = def
+		p.ByteOffset = varValueOffset(content, lineOffsets, p.Line, name, def)
+		p.Note = "version from $" + name
 	}
-	if thirdParty {
+	if thirdParty != "" {
 		p.Status = StatusUnsupported
+		p.Note = "stage adds a third-party package source (" + thirdParty + "); its versions can't be checked against the OS repository"
 	}
 }
 
-// isARGRef returns true if the string is a shell variable reference like
-// ${VAR} or $VAR.
-func isARGRef(s string) bool {
-	return strings.HasPrefix(s, "$")
+// varRef reports whether s is exactly a variable reference ($VAR or ${VAR})
+// and returns the name.
+func varRef(s string) (string, bool) {
+	if !strings.HasPrefix(s, "$") {
+		return "", false
+	}
+	name := strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(s, "$"), "{"), "}")
+	if !identRe.MatchString(name) {
+		return "", false
+	}
+	return name, true
 }
 
-// argVarName extracts the variable name from ${VAR} or $VAR.
-func argVarName(s string) string {
-	s = strings.TrimPrefix(s, "$")
-	s = strings.TrimPrefix(s, "{")
-	s = strings.TrimSuffix(s, "}")
-	return s
+var identRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// varValueOffset finds the byte offset of value in the nearest ARG or ENV
+// line above runLine that assigns it to name ("NAME=value", quoted or not,
+// or ENV's "NAME value"). It returns -1 when the definition isn't found,
+// which makes PlanEdits leave the pin alone rather than edit a guess.
+func varValueOffset(content []byte, lineOffsets []int, runLine int, name, value string) int {
+	for line := runLine - 1; line >= 1 && line <= len(lineOffsets); line-- {
+		start := lineOffsets[line-1]
+		end := len(content)
+		if line < len(lineOffsets) {
+			end = lineOffsets[line]
+		}
+		text := content[start:end]
+		trimmed := bytes.TrimLeft(text, " \t")
+		upper := strings.ToUpper(string(trimmed[:min(4, len(trimmed))]))
+		if !strings.HasPrefix(upper, "ARG ") && !strings.HasPrefix(upper, "ENV ") {
+			continue
+		}
+		for _, form := range []string{name + "=" + value, name + `="` + value, name + "='" + value, name + " " + value} {
+			if i := bytes.Index(text, []byte(form)); i >= 0 {
+				// Make sure "NAME" isn't the tail of a longer name.
+				if i > 0 && isIdentByte(text[i-1]) {
+					continue
+				}
+				return start + i + len(form) - len(value)
+			}
+		}
+	}
+	return -1
+}
+
+func isIdentByte(b byte) bool {
+	return b == '_' || (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
 // extractFromRun tokenises a RUN instruction's argument string and returns
-// any exact-pinned packages from apt/apk install|add invocations.
+// any exact-pinned packages from package-manager install invocations.
 func extractFromRun(runArgs string, instrLine int, content []byte, lineOffsets []int, stage string) []Pin {
 	// Normalise line continuations and split into individual commands.
 	normalised := strings.ReplaceAll(runArgs, "\\\n", " ")
@@ -144,24 +224,11 @@ func extractFromRun(runArgs string, instrLine int, content []byte, lineOffsets [
 
 	var pins []Pin
 	for _, cmd := range cmds {
-		tokens := tokenise(cmd)
-		if len(tokens) < 2 {
-			continue
-		}
-		mgr, ok := packageManager(tokens[0])
+		mgr, pkgs, ok := installArgs(tokenise(cmd))
 		if !ok {
 			continue
 		}
-		if !isInstall(mgr, tokens[1]) {
-			continue
-		}
-		// Walk remaining tokens; flags start with '-'. apt and apk pin with
-		// "pkg=version"; rpm-family managers use "pkg-version-release".
-		for _, tok := range tokens[2:] {
-			if strings.HasPrefix(tok, "-") {
-				continue
-			}
-
+		for _, tok := range pkgs {
 			var pkg, ver string
 			if mgr == "rpm" {
 				var ok bool
@@ -169,13 +236,13 @@ func extractFromRun(runArgs string, instrLine int, content []byte, lineOffsets [
 					continue // unpinned — skip
 				}
 			} else {
-				eq := strings.Index(tok, "=")
-				if eq < 0 {
+				var ok bool
+				if pkg, ver, ok = strings.Cut(tok, "="); !ok {
 					continue // unpinned — skip
 				}
-				pkg, ver = tok[:eq], tok[eq+1:]
 			}
-			if pkg == "" || ver == "" {
+			// A glob ("curl=7.88*") or an empty side is not an exact pin.
+			if pkg == "" || ver == "" || strings.ContainsAny(ver, "*?") {
 				continue
 			}
 
@@ -192,6 +259,83 @@ func extractFromRun(runArgs string, instrLine int, content []byte, lineOffsets [
 		}
 	}
 	return pins
+}
+
+// managerSyntax describes one package manager's command line: its install
+// verb and the options that take a separate value ("-o x", "--virtual x"),
+// so that value is never mistaken for the verb or a package.
+type managerSyntax struct {
+	mgr        string
+	verb       string
+	valueFlags map[string]bool
+}
+
+var syntaxes = map[string]managerSyntax{
+	"apt-get": {"apt", "install", set("-o", "--option", "-t", "--target-release", "-c", "--config-file")},
+	"apt":     {"apt", "install", set("-o", "--option", "-t", "--target-release", "-c", "--config-file")},
+	"apk": {"apk", "add", set("-X", "--repository", "-p", "--root", "--arch", "--keys-dir",
+		"--repositories-file", "-t", "--virtual", "--cache-dir")},
+	"dnf": {"rpm", "install", set("-c", "--config", "--repo", "--repoid", "--enablerepo", "--disablerepo",
+		"--releasever", "--installroot", "-x", "--exclude", "--setopt")},
+	"yum": {"rpm", "install", set("-c", "--config", "--enablerepo", "--disablerepo", "--releasever",
+		"--installroot", "-x", "--exclude", "--setopt")},
+	"microdnf": {"rpm", "install", set("--enablerepo", "--disablerepo", "--releasever", "--installroot", "--setopt")},
+}
+
+func set(items ...string) map[string]bool {
+	m := make(map[string]bool, len(items))
+	for _, i := range items {
+		m[i] = true
+	}
+	return m
+}
+
+// installArgs recognises "<manager> [options] <install-verb> [options|packages]",
+// optionally behind environment assignments (DEBIAN_FRONTEND=noninteractive),
+// env or sudo, and returns the manager and the package tokens. Options may
+// come before the verb (apt-get -y install, apk --no-cache add) and
+// value-taking options consume their value.
+func installArgs(tokens []string) (mgr string, pkgs []string, ok bool) {
+	i := 0
+	for i < len(tokens) && (isAssignment(tokens[i]) || tokens[i] == "env" || tokens[i] == "sudo") {
+		i++
+	}
+	if i >= len(tokens) {
+		return "", nil, false
+	}
+	syn, known := syntaxes[tokens[i]]
+	if !known {
+		return "", nil, false
+	}
+	i++
+	// Options before the verb.
+	for i < len(tokens) && strings.HasPrefix(tokens[i], "-") {
+		if syn.valueFlags[tokens[i]] {
+			i++
+		}
+		i++
+	}
+	if i >= len(tokens) || tokens[i] != syn.verb {
+		return "", nil, false
+	}
+	i++
+	for ; i < len(tokens); i++ {
+		t := tokens[i]
+		if strings.HasPrefix(t, "-") {
+			if syn.valueFlags[t] {
+				i++ // skip the option's value (e.g. apk add --virtual .build-deps)
+			}
+			continue
+		}
+		pkgs = append(pkgs, unquote(t))
+	}
+	return syn.mgr, pkgs, true
+}
+
+// isAssignment reports whether tok is a shell variable assignment (NAME=value).
+func isAssignment(tok string) bool {
+	name, _, ok := strings.Cut(tok, "=")
+	return ok && identRe.MatchString(name)
 }
 
 // splitCommands splits a shell fragment on &&, ||, ;, and | operators.
@@ -216,50 +360,36 @@ func tokenise(s string) []string {
 	return strings.Fields(s)
 }
 
-// packageManager returns the normalised manager name and true if the command
-// string is a recognised package manager binary.
-func packageManager(cmd string) (string, bool) {
-	switch cmd {
-	case "apt-get", "apt":
-		return "apt", true
-	case "apk":
-		return "apk", true
-	case "yum", "dnf", "microdnf":
-		return "rpm", true
-	}
-	return "", false
-}
-
-// isInstall returns true when the subcommand is the install verb for the given manager.
-func isInstall(mgr, sub string) bool {
-	switch mgr {
-	case "apt", "rpm":
-		return sub == "install"
-	case "apk":
-		return sub == "add"
-	}
-	return false
-}
-
-// splitRPMToken splits an RPM name-version-release token such as
+// splitRPMToken splits an RPM pin into name and version, e.g.
 // "curl-7.76.1-26.el9" into ("curl", "7.76.1-26.el9").
 //
-// RPM separates the name from the version with a dash, and package names may
-// themselves contain dashes ("ca-certificates-2023.2.60"). The convention is
-// that the version begins at the first dash followed by a digit, which is what
-// rpm's own name parsing relies on.
+// Names may themselves contain dashes and digits ("ca-certificates",
+// "java-17-openjdk-headless", "gcc-toolset-12-runtime"), so the split works
+// from the right, the way rpm reads name-version-release:
+//
+//   - name-version-release: the last segment (release) contains a digit and
+//     the one before it (version) starts with a digit;
+//   - name-version (dnf accepts it): the last segment starts with a digit
+//     and contains a '.' or ':' (so "lib32-2" stays a name);
+//
+// anything else is an unpinned package name. Splitting at the first
+// "dash + digit" instead turned "java-17-openjdk-headless" into package
+// "java" pinned at "17-openjdk-headless".
 func splitRPMToken(tok string) (pkg, version string, ok bool) {
-	for i := 0; i < len(tok)-1; i++ {
-		if tok[i] != '-' {
-			continue
-		}
-		if tok[i+1] >= '0' && tok[i+1] <= '9' {
-			pkg, version = tok[:i], tok[i+1:]
-			return pkg, version, pkg != "" && version != ""
-		}
+	segs := strings.Split(tok, "-")
+	n := len(segs)
+	if n >= 3 && strings.ContainsAny(segs[n-1], "0123456789") && startsWithDigit(segs[n-2]) {
+		pkg = strings.Join(segs[:n-2], "-")
+		return pkg, segs[n-2] + "-" + segs[n-1], pkg != ""
+	}
+	if n >= 2 && startsWithDigit(segs[n-1]) && strings.ContainsAny(segs[n-1], ".:") {
+		pkg = strings.Join(segs[:n-1], "-")
+		return pkg, segs[n-1], pkg != ""
 	}
 	return "", "", false
 }
+
+func startsWithDigit(s string) bool { return s != "" && s[0] >= '0' && s[0] <= '9' }
 
 // buildLineOffsets returns a slice where lineOffsets[i] is the byte offset of
 // the start of line i+1 (1-indexed lines).

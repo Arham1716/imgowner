@@ -144,8 +144,9 @@ func TestBuildLookupScript_Apk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildLookupScript: %v", err)
 	}
-	if !strings.Contains(script, "apk search") {
-		t.Errorf("expected 'apk search' in script; got: %s", script)
+	// apk search -q prints names without versions; apk policy lists versions.
+	if !strings.Contains(script, "apk policy curl") || strings.Contains(script, "apk search") {
+		t.Errorf("expected an 'apk policy' version listing; got: %s", script)
 	}
 }
 
@@ -244,8 +245,8 @@ func TestBuildLookupScript_RPM(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildLookupScript: %v", err)
 	}
-	if !strings.Contains(script, "list available") {
-		t.Errorf("expected a dnf/yum availability query; got: %s", script)
+	if !strings.Contains(script, "list --showduplicates curl") {
+		t.Errorf("expected a dnf/yum listing of every version; got: %s", script)
 	}
 }
 
@@ -294,10 +295,11 @@ RUN apt-get install -y curl=${CURL_VER}
 	}
 }
 
-// Found by FuzzExtract: the RUN-line offset of "${CURL_VER}" doesn't point at
-// the resolved version, so an update edit there failed ApplyEdits's mismatch
-// check and aborted the entire pins update. The pin must be skipped instead.
-func TestExtract_VariablePin_WithDefault_IsNotEditable(t *testing.T) {
+// The acceptance run found ARG-default pins never updated: their offset was
+// set to -1. The edit must land on the ARG line's value instead (the RUN
+// line's "${CURL_VER}" stays), and the result must still apply cleanly.
+// (Originally found by FuzzExtract, when the RUN-line offset was used.)
+func TestExtract_VariablePin_WithDefault_EditsTheARGLine(t *testing.T) {
 	src := `FROM debian:12-slim
 ARG CURL_VER=7.88.1-10
 RUN apt-get install -y curl=${CURL_VER} openssl=3.0.11-1
@@ -315,11 +317,19 @@ RUN apt-get install -y curl=${CURL_VER} openssl=3.0.11-1
 		pins[i].Available = pins[i].Version + "+1"
 	}
 	edits := PlanEdits(pins)
-	if len(edits) != 1 || edits[0].OldVersion != "3.0.11-1" {
-		t.Fatalf("expected only the literal openssl pin to be edited, got %+v", edits)
+	if len(edits) != 2 {
+		t.Fatalf("expected both pins to be edited, got %+v", edits)
 	}
-	if _, err := ApplyEdits([]byte(src), edits); err != nil {
-		t.Fatalf("ApplyEdits must succeed once the ARG-resolved pin is skipped: %v", err)
+	got, err := ApplyEdits([]byte(src), edits)
+	if err != nil {
+		t.Fatalf("ApplyEdits: %v", err)
+	}
+	want := `FROM debian:12-slim
+ARG CURL_VER=7.88.1-10+1
+RUN apt-get install -y curl=${CURL_VER} openssl=3.0.11-1+1
+`
+	if string(got) != want {
+		t.Errorf("got:\n%s\nwant:\n%s", got, want)
 	}
 }
 

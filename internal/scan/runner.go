@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"sync"
 	"time"
 
 	"github.com/Arham1716/imgowner/internal/safeio"
@@ -72,8 +74,27 @@ type Runner struct {
 // parsed result. Uses the digest cache; skips Trivy if a valid cache entry
 // exists (DQ-1). imageRef must be in the form name@sha256:... .
 func (r *Runner) Scan(ctx context.Context, imageRef, digest string) (*Result, error) {
-	// Check cache first.
-	if cached, err := ReadCache(digest, r.TrivyVersion); err == nil && cached != nil {
+	return r.scan(ctx, imageRef, "", digest)
+}
+
+// ScanArchive scans an exported image tarball (a locally built image that
+// was never pushed) with `trivy image --input`, under the same cache rules.
+func (r *Runner) ScanArchive(ctx context.Context, archive, digest string) (*Result, error) {
+	return r.scan(ctx, archive, archive, digest)
+}
+
+func (r *Runner) scan(ctx context.Context, imageRef, archive, digest string) (*Result, error) {
+	// A cached result is only reused for the same Trivy version and the same
+	// vulnerability DB; anything else could hide CVEs published since.
+	stamp, err := DBStamp(ctx)
+	if err != nil {
+		warnOnce("scan cache disabled: %v", err)
+	}
+	cached, err := ReadCache(digest, r.TrivyVersion, stamp)
+	if err != nil {
+		warnOnce("scan cache disabled: %v", err)
+	}
+	if cached != nil {
 		var res Result
 		if err := json.Unmarshal(cached, &res); err == nil {
 			return &res, nil
@@ -93,7 +114,11 @@ func (r *Runner) Scan(ctx context.Context, imageRef, digest string) (*Result, er
 		"--scanners", "vuln",
 		"--platform", r.Platform,
 		"--quiet",
-		imageRef,
+	}
+	if archive != "" {
+		args = append(args, "--input", archive)
+	} else {
+		args = append(args, imageRef)
 	}
 	cmd := exec.CommandContext(ctx, "trivy", args...)
 	raw, err := safeio.Output(cmd, safeio.MaxTrivyReport, "trivy report")
@@ -109,14 +134,31 @@ func (r *Runner) Scan(ctx context.Context, imageRef, digest string) (*Result, er
 		return nil, fmt.Errorf("imgowner: trivy scan failed for %s: %w", imageRef, err)
 	}
 
-	// Persist to cache.
-	_ = WriteCache(digest, r.TrivyVersion, raw)
+	// Trivy may have refreshed its DB during this scan, so key the entry on
+	// the DB the scan actually used. A failed write costs the next run a
+	// rescan, never correctness, so it warns rather than fails.
+	if after, err := DBStamp(ctx); err == nil {
+		if err := WriteCache(digest, r.TrivyVersion, after, raw); err != nil {
+			warnOnce("scan result not cached: %v", err)
+		}
+	}
 
 	var res Result
 	if err := json.Unmarshal(raw, &res); err != nil {
 		return nil, fmt.Errorf("imgowner: parsing trivy output: %w", err)
 	}
 	return &res, nil
+}
+
+// warned dedupes warnings: base-image recommendation scans many candidates
+// through one Runner, and the same cache problem should be reported once.
+var warned sync.Map
+
+func warnOnce(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	if _, seen := warned.LoadOrStore(msg, true); !seen {
+		fmt.Fprintln(os.Stderr, "warning: "+msg)
+	}
 }
 
 // trimStderr caps Trivy's stderr so a runaway log cannot flood the error path.
