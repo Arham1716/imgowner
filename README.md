@@ -223,8 +223,11 @@ port instead of a free one.
 4. Each finding's layer position and package class decide its owner: below the
    boundary is `base`, OS packages above it are `added-os`, language packages
    are `app`.
-5. Scan results are cached by image digest and Trivy version, so repeat runs
-   over an unchanged image skip the scan.
+5. Scan results are cached per user (in the OS cache directory, owner-only)
+   by image digest, Trivy version and vulnerability-DB version, for at most
+   24 hours. A repeat run over an unchanged image skips the scan, but as soon
+   as Trivy's DB updates the image is scanned again, so newly published CVEs
+   are reported.
 
 ## Limitations
 
