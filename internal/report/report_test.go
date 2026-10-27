@@ -219,8 +219,12 @@ func TestWrite_CreatesOneFilePerFormat(t *testing.T) {
 		OutputDir: dir,
 		Formats:   []string{"md", "json", "sarif"},
 	}
-	if err := Write(req); err != nil {
+	written, err := Write(req)
+	if err != nil {
 		t.Fatalf("Write: %v", err)
+	}
+	if len(written) != 3 {
+		t.Errorf("Write reported %d paths, want 3: %v", len(written), written)
 	}
 	for _, name := range []string{"imgowner-report.md", "imgowner-report.json", "imgowner-report.sarif"} {
 		path := filepath.Join(dir, name)
@@ -235,15 +239,16 @@ func TestWrite_CreatesOneFilePerFormat(t *testing.T) {
 	}
 }
 
-func TestWrite_UnknownFormatIsIgnored(t *testing.T) {
+// An unknown format used to be skipped silently, so `--format xml` wrote
+// nothing and exited 0.
+func TestWrite_UnknownFormatIsAnError(t *testing.T) {
 	dir := t.TempDir()
 	req := Request{Image: "x", BaseRef: "y", OutputDir: dir, Formats: []string{"yaml"}}
-	if err := Write(req); err != nil {
-		t.Fatalf("an unrecognised format should be silently skipped, not error: %v", err)
+	if _, err := Write(req); err == nil {
+		t.Fatal("Write accepted an unknown format")
 	}
-	entries, _ := os.ReadDir(dir)
-	if len(entries) != 0 {
-		t.Errorf("no file should have been written for an unknown format, found %d", len(entries))
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Errorf("no file should have been written, found %d", len(entries))
 	}
 }
 
