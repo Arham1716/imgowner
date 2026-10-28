@@ -361,7 +361,7 @@ jobs:
       - id: scan
         uses: ./
         with:
-          version: 0.5.0
+          version: 0.6.0
           image: localhost:5000/fx:ci
           dockerfile: ${{ runner.temp }}/fx/Dockerfile
           config: ${{ runner.temp }}/fx/imgowner.yaml
@@ -377,13 +377,34 @@ jobs:
           test -n "$COUNT"
           test "$COUNT" = "$(jq '.findings | length' action-report/imgowner-report.json)"
 
+      # The common case: a repository with no .imgowner.yaml at all, using
+      # the config input's own default. This is the README's own example and
+      # went unverified: the action always passed --config .imgowner.yaml
+      # explicitly, which imgowner correctly treats as "the user asked for
+      # this file", requiring it to exist -- breaking every user who never
+      # created one.
+      - id: noconfig
+        uses: ./
+        with:
+          version: 0.6.0
+          image: localhost:5000/fx:ci
+          dockerfile: ${{ runner.temp }}/fx/Dockerfile
+          output-dir: noconfig-report
+          artifact-name: noconfig-report # "scan" above already succeeds and
+          # uploads the default artifact-name; this one would too, and two
+          # uploads under the same name in one job conflict (409).
+          upload-sarif: 'false'
+
+      - name: The action works with no config file in the repository
+        run: test -s noconfig-report/imgowner-report.json
+
       # The payloads only create marker files; the inputs must reach imgowner
       # as plain strings and never run.
       - id: hostile
         continue-on-error: true
         uses: ./
         with:
-          version: 0.5.0
+          version: 0.6.0
           image: 'alpine:3.20"; touch /tmp/injected-image; echo "'
           dockerfile: 'Dockerfile"; touch /tmp/injected-dockerfile; echo "'
           pr-id: '1; touch /tmp/injected-pr'

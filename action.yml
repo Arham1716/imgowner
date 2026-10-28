@@ -22,7 +22,7 @@ inputs:
     required: false
     default: imgowner-report
   config:
-    description: Path to .imgowner.yaml config file
+    description: Path to .imgowner.yaml config file. If it doesn't exist, imgowner's built-in defaults are used (the flag is omitted, not an error).
     required: false
     default: .imgowner.yaml
   pr-id:
@@ -145,7 +145,14 @@ runs:
         IN_PR_ID: ${{ inputs.pr-id }}
       run: |
         set -euo pipefail
-        args=(ci --image "$IN_IMAGE" --dockerfile "$IN_DOCKERFILE" --config "$IN_CONFIG" --output-dir "$IN_OUTPUT_DIR")
+        args=(ci --image "$IN_IMAGE" --dockerfile "$IN_DOCKERFILE" --output-dir "$IN_OUTPUT_DIR")
+        # --config is only passed when the file is actually there: imgowner
+        # requires an explicitly named config file to exist (a typo'd path
+        # must not be silently ignored), and the config input's default
+        # (.imgowner.yaml) is the common case where the repository has no
+        # config file at all and imgowner's own built-in defaults should
+        # apply -- exactly as running the CLI with no --config flag does.
+        [ -f "$IN_CONFIG" ] && args+=(--config "$IN_CONFIG")
         IFS=',' read -r -a formats <<< "$IN_FORMAT"
         for f in "${formats[@]}"; do
           f="${f//[[:space:]]/}"
@@ -182,4 +189,8 @@ runs:
       env:
         IN_DOCKERFILE: ${{ inputs.dockerfile }}
         IN_CONFIG: ${{ inputs.config }}
-      run: imgowner pins check --dockerfile "$IN_DOCKERFILE" --config "$IN_CONFIG"
+      run: |
+        set -euo pipefail
+        args=(pins check --dockerfile "$IN_DOCKERFILE")
+        [ -f "$IN_CONFIG" ] && args+=(--config "$IN_CONFIG")
+        imgowner "${args[@]}"
