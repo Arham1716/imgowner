@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -423,6 +425,133 @@ func runPinLookup(
 	return pinList, nil
 }
 
+// ciPins runs the pin check inside ci (FR-23). It never fails the command:
+// a missing container runtime or a failed lookup is reported in the notes
+// (FR-27: "never skip silently") and the attribution result stands. Pins
+// whose upgrade reaches the fixed version of an attributed CVE on that
+// package are promoted to fixes-CVE(s) (FR-16).
+func ciPins(ctx context.Context, cfg config.Config, dockerfilePath string, findings []attribution.Finding) ([]pins.Pin, string) {
+	if !cfg.Pins.Enabled {
+		return nil, ""
+	}
+	content, err := safeio.ReadFile(dockerfilePath, safeio.MaxDockerfile)
+	if err != nil {
+		return nil, "Pin check skipped — " + err.Error()
+	}
+	df, err := dockerfile.ParseBytes(content)
+	if err != nil {
+		return nil, "Pin check skipped — " + err.Error()
+	}
+	pinList, err := pins.Extract(content, df, cfg.Pins.IgnorePackages...)
+	if err != nil {
+		return nil, "Pin check skipped — " + err.Error()
+	}
+	if len(pinList) == 0 {
+		return nil, ""
+	}
+	warnUnlookupable(pinList)
+	rt, err := pins.DetectRuntime(ctx)
+	if err != nil {
+		note := "Pin check skipped — no container runtime detected (install Docker or Podman to check pinned versions)"
+		fmt.Fprintln(os.Stderr, "warning: "+note)
+		return pinList, note
+	}
+	pinList, err = runPinLookup(ctx, rt, pinList, df, "", cfg)
+	if err != nil {
+		note := "Pin check incomplete — " + err.Error()
+		fmt.Fprintln(os.Stderr, "warning: "+note)
+		return pinList, note
+	}
+	return pins.ApplyCVEFixes(pinList, cveFixesFor(pinList, findings)), ""
+}
+
+// cveFixesFor maps each pinned package to the attributed CVEs its available
+// upgrade would fix: findings on that package, at the pinned version, whose
+// fixed version the upgrade reaches.
+func cveFixesFor(pinList []pins.Pin, findings []attribution.Finding) map[string][]string {
+	out := map[string][]string{}
+	for _, p := range pinList {
+		if p.Available == "" {
+			continue
+		}
+		seen := map[string]bool{}
+		for _, f := range findings {
+			if f.Package != p.Package || f.InstalledVersion != p.Version || f.FixedVersion == "" || seen[f.CVE] {
+				continue
+			}
+			for _, fixed := range strings.Split(f.FixedVersion, ",") {
+				if fixed = strings.TrimSpace(fixed); fixed != "" && pins.VersionAtLeast(p.Available, fixed) {
+					out[p.Package] = append(out[p.Package], f.CVE)
+					seen[f.CVE] = true
+					break
+				}
+			}
+		}
+	}
+	return out
+}
+
+// scmClient detects the SCM and builds its client; both failures are errors
+// the caller reports (they used to fall through to a silent no-op client).
+func scmClient(cfg config.Config) (scm.PRClient, error) {
+	provider, err := scm.Detect(cfg.SCM.Provider)
+	if err != nil {
+		return nil, err
+	}
+	return scm.NewClient(provider)
+}
+
+// postComment renders the Markdown report and posts or updates the PR comment.
+func postComment(ctx context.Context, cfg config.Config, prID string, req report.Request) error {
+	client, err := scmClient(cfg)
+	if err != nil {
+		return err
+	}
+	var buf strings.Builder
+	if err := report.WriteToWriter(&buf, req); err != nil {
+		return err
+	}
+	return client.EnsureComment(ctx, prID, buf.String())
+}
+
+// repoRelativePath turns the Dockerfile path into the repository-relative,
+// forward-slash path the SCM API commits to. The repository root is the CI
+// workspace (GitHub Actions, Azure Pipelines) or `git rev-parse
+// --show-toplevel`; a Dockerfile outside it is an error.
+func repoRelativePath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	root := os.Getenv("GITHUB_WORKSPACE")
+	if root == "" {
+		root = os.Getenv("BUILD_SOURCESDIRECTORY")
+	}
+	if root == "" {
+		out, err := exec.Command("git", "-C", filepath.Dir(abs), "rev-parse", "--show-toplevel").Output()
+		if err != nil {
+			return "", fmt.Errorf("locating the repository root for %s: not in a git checkout", path)
+		}
+		root = strings.TrimSpace(string(out))
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	// Resolve symlinks on both sides so /tmp vs /private/tmp style aliases match.
+	if r, err := filepath.EvalSymlinks(rootAbs); err == nil {
+		rootAbs = r
+	}
+	if a, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = a
+	}
+	rel, err := filepath.Rel(rootAbs, abs)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return "", fmt.Errorf("%s is outside the repository at %s", path, rootAbs)
+	}
+	return filepath.ToSlash(rel), nil
+}
+
 // warnUnlookupable prints why each variable or unsupported pin is skipped
 // (FR-13, FR-14), on stderr so --format json output stays clean.
 func warnUnlookupable(pinList []pins.Pin) {
@@ -540,30 +669,43 @@ func pinsUpdateCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 				return nil
 			}
 
-			// Open or update a pull request (Story 3.2, FR-18).
-			provider, _ := scm.Detect(cfg.SCM.Provider)
-			client, err := scm.NewClient(provider)
+			// Open or update a pull request (FR-21, FR-22).
+			client, err := scmClient(cfg)
+			if err != nil {
+				return writeStructuredError(map[string]string{"error": err.Error(),
+					"hint": "the Dockerfile was updated locally; set scm.provider or run inside GitHub Actions / Azure DevOps to open a PR"})
+			}
+			repoPath, err := repoRelativePath(dockerfilePath)
 			if err != nil {
 				return writeStructuredError(map[string]string{"error": err.Error()})
 			}
-			prBody := buildPinsPRBody(pinList)
-			prURL, err := client.OpenOrUpdatePR(ctx, scm.PRRequest{
-				HeadBranch: "imgowner/pin-updates",
-				BaseBranch: baseBranch,
-				Title:      "chore: update pinned OS package versions",
-				Body:       prBody,
+			res, err := client.OpenOrUpdatePR(ctx, scm.PRRequest{
+				BranchPrefix:  cfg.SCM.BranchPrefix,
+				BaseBranch:    baseBranch,
+				Title:         "chore: update pinned OS package versions",
+				Body:          buildPinsPRBody(pinList),
+				Labels:        cfg.SCM.Labels,
+				File:          scm.FileChange{Path: repoPath, Content: updated},
+				CommitMessage: fmt.Sprintf("chore: update %d pinned OS package version(s) in %s", len(edits), repoPath),
 			})
 			if err != nil {
 				return writeStructuredError(map[string]string{"error": err.Error()})
 			}
-			fmt.Printf("PR: %s\n", prURL)
+			for _, w := range res.Warnings {
+				fmt.Fprintln(os.Stderr, "warning: "+w)
+			}
+			verb := "Updated"
+			if res.Created {
+				verb = "Opened"
+			}
+			fmt.Printf("%s PR %s (branch %s)\n", verb, res.URL, res.Branch)
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&dockerfilePath, "dockerfile", "Dockerfile", "path to Dockerfile")
 	cmd.Flags().StringVar(&imageRef, "image", "", "override base image ref for container lookup")
 	cmd.Flags().BoolVar(&openPR, "open-pr", false, "open a pull request with updates")
-	cmd.Flags().StringVar(&baseBranch, "base-branch", "main", "target branch for the pull request")
+	cmd.Flags().StringVar(&baseBranch, "base-branch", "", "target branch for the pull request (default: the repository's default branch)")
 	return cmd
 }
 
@@ -639,6 +781,11 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 					"path":  dockerfilePath,
 				})
 			}
+			if prID != "" {
+				if err := scm.ValidPRID(prID); err != nil {
+					return writeStructuredError(map[string]string{"error": err.Error()})
+				}
+			}
 
 			cfg, trivyVer, err := loadConfig(ctx, *cfgPath)
 			if err != nil {
@@ -704,8 +851,16 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 				}
 			}
 
-			// ── Policy evaluation (FR-27) ─────────────────────────────────
+			// ── Pin check (FR-23, FR-27) ─────────────────────────────────
+			pinList, pinsNote := ciPins(ctx, cfg, dockerfilePath, findings)
+
+			// ── Policy evaluation ─────────────────────────────────────────
 			breaching := evaluatePolicy(findings, cfg)
+			verdict := "passed"
+			if breaching > 0 {
+				verdict = fmt.Sprintf("failed — %d finding(s) at or above %s owned by %s",
+					breaching, strings.Join(cfg.Policy.FailOn, "/"), enforcedOwners(cfg))
+			}
 
 			// ── Report writing (FR-28) ────────────────────────────────────
 			written, err := report.Write(report.Request{
@@ -714,6 +869,9 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 				BaseRef:    baseRef,
 				Findings:   findings,
 				Candidates: candidates,
+				Pins:       pinList,
+				PinsNote:   pinsNote,
+				Verdict:    verdict,
 				OutputDir:  outDir,
 				Formats:    fmts,
 				Dockerfile: dockerfilePath,
@@ -732,24 +890,27 @@ func ciCmd(ctx context.Context, cfgPath *string) *cobra.Command {
 				Dockerfile: dockerfilePath,
 				Findings:   findings,
 				Candidates: candidates,
+				Pins:       pinList,
 			})
 
 			// ── SCM comment (FR-24) ───────────────────────────────────────
+			// A failure here doesn't change the verdict, but it must be visible:
+			// v0.5.0 dropped every error, so a missing token meant no comment
+			// and no clue why.
 			if prID != "" {
-				provider, _ := scm.Detect(cfg.SCM.Provider)
-				client, scmErr := scm.NewClient(provider)
-				if scmErr == nil {
-					var commentBuf strings.Builder
-					_ = report.WriteToWriter(&commentBuf, report.Request{
-						Image:      imageRef,
-						Digest:     res.Digest,
-						BaseRef:    baseRef,
-						Findings:   findings,
-						Candidates: candidates,
-						Formats:    []string{"md"},
-						Dockerfile: dockerfilePath,
-					})
-					_ = client.EnsureComment(ctx, prID, commentBuf.String())
+				if err := postComment(ctx, cfg, prID, report.Request{
+					Image:      imageRef,
+					Digest:     res.Digest,
+					BaseRef:    baseRef,
+					Findings:   findings,
+					Candidates: candidates,
+					Pins:       pinList,
+					PinsNote:   pinsNote,
+					Verdict:    verdict,
+					Formats:    []string{"md"},
+					Dockerfile: dockerfilePath,
+				}); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: PR comment not posted: %v\n", err)
 				}
 			}
 

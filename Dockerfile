@@ -14,4 +14,12 @@ FROM aquasec/trivy:0.76.0@sha256:2416d1f74045b57274df1a340eee6b510cacd73c66a6ccb
 # the one SBOM'd and signed alongside the archives for this release.
 COPY imgowner /usr/local/bin/imgowner
 
+# Run unprivileged (the base image runs as root). A numeric UID needs no
+# /etc/passwd entry, so no extra layer is added and the image's own layer stays
+# just the binary (NFR-18). HOME=/tmp gives Trivy's cache and the scan history a
+# writable home; mount a work directory and pass --user "$(id -u):$(id -g)" so
+# reports land in it with your own ownership.
+ENV HOME=/tmp
+USER 10001:10001
+
 ENTRYPOINT ["/usr/local/bin/imgowner"]

@@ -101,7 +101,7 @@ func Attribute(ctx context.Context, req AttributeRequest) (*AttributeResult, err
 	}
 
 	// Recommendation is advisory; a registry failure here must not lose the findings.
-	if req.BaseCandidates > 0 && base.Confident {
+	if req.BaseCandidates > 0 && base.Confident && !image.IsScratch(baseRef) {
 		out.Candidates, _ = baserec.Recommend(ctx, baseRef, result, runner, req.Platform, req.BaseCandidates)
 	}
 
