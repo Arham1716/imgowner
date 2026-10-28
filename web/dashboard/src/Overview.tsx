@@ -63,6 +63,11 @@ export function Overview({ scans, themeKey }: { scans: Summary[]; themeKey: stri
   }
 
   const owned = OWNED.reduce((a, o) => a + (latest.counts[o] ?? 0), 0);
+  const unattributed = latest.counts["unattributed"] ?? 0;
+  // When ownership couldn't be determined, "0 findings you own" would read as
+  // all-clear; say what actually happened instead.
+  const notAttributed = unattributed > 0 && owned === 0 && (latest.counts["base"] ?? 0) === 0;
+  const reason = findings.find((f) => f.owner === "unattributed" && f.unattributed_reason)?.unattributed_reason;
   const ownedFixable = findings.filter((f) => (OWNED as readonly string[]).includes(f.owner) && f.fixed_version).length;
   const total = sum(latest.counts);
   const prevOwned = previous ? OWNED.reduce((a, o) => a + (previous.counts[o] ?? 0), 0) : undefined;
@@ -71,24 +76,45 @@ export function Overview({ scans, themeKey }: { scans: Summary[]; themeKey: stri
 
   return (
     <>
-      <section className="hero">
-        <div>
-          <div className="eyebrow">Findings you own</div>
-          <div className="hero-fig">{owned}</div>
-          <p>
-            in the latest scan of <b className="mono">{latest.repository}</b>
-            {findings.length > 0 && owned > 0 ? ` — ${ownedFixable} of them already have a fix available` : ""}.
-          </p>
-          <div className="chips">
-            <span className="chip">
-              <Delta now={owned} before={prevOwned} label="vs previous scan" />
-            </span>
-            <span className="chip">
-              <i className="dot" style={{ "--c": ownerColor("base") } as CSSProperties} />
-              {latest.counts["base"] ?? 0} in the base image — fix by changing base
-            </span>
+      <section className={`hero${notAttributed ? " warn" : ""}`}>
+        {notAttributed ? (
+          <div>
+            <div className="eyebrow">Ownership not determined</div>
+            <div className="hero-fig">{unattributed}</div>
+            <p>
+              findings in the latest scan of <b className="mono">{latest.repository}</b> couldn't be attributed to the base
+              image or to your Dockerfile, so none of them is counted as yours or the base image's.
+            </p>
+            {reason && <p className="reason">Why: {reason}</p>}
+            <div className="chips">
+              <span className="chip">Fix the cause above (usually: pass --base-digest) and scan again</span>
+            </div>
           </div>
-        </div>
+        ) : (
+          <div>
+            <div className="eyebrow">Findings you own</div>
+            <div className="hero-fig">{owned}</div>
+            <p>
+              in the latest scan of <b className="mono">{latest.repository}</b>
+              {findings.length > 0 && owned > 0 ? ` — ${ownedFixable} of them already have a fix available` : ""}.
+            </p>
+            <div className="chips">
+              <span className="chip">
+                <Delta now={owned} before={prevOwned} label="vs previous scan" />
+              </span>
+              <span className="chip">
+                <i className="dot" style={{ "--c": ownerColor("base") } as CSSProperties} />
+                {latest.counts["base"] ?? 0} in the base image — fix by changing base
+              </span>
+              {unattributed > 0 && (
+                <span className="chip">
+                  <i className="dot" style={{ "--c": ownerColor("unattributed") } as CSSProperties} />
+                  {unattributed} not attributed
+                </span>
+              )}
+            </div>
+          </div>
+        )}
         <div className="bars">
           <StackedBar
             title="Who owns the findings"

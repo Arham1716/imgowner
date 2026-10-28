@@ -95,6 +95,25 @@ export function TrendChart({ scans, themeKey }: { scans: Summary[]; themeKey: st
             const cur = items[i];
             if (prev && cur && cur.y - prev.y < gap) cur.y = prev.y + gap;
           }
+          // Nudging pushes labels downward; when several lines sit at 0 that
+          // ran them off the plot and over the x-axis labels. Pull the stack
+          // back inside the plot from the bottom, then from the top.
+          const top = u.bbox.top + 6 * dpr;
+          const bottom = u.bbox.top + u.bbox.height - 6 * dpr;
+          for (let i = items.length - 1; i >= 0; i--) {
+            const cur = items[i];
+            const next = items[i + 1];
+            if (!cur) continue;
+            const limit = next ? next.y - gap : bottom;
+            if (cur.y > limit) cur.y = limit;
+          }
+          for (let i = 0; i < items.length; i++) {
+            const cur = items[i];
+            const prev = items[i - 1];
+            if (!cur) continue;
+            const limit = prev ? prev.y + gap : top;
+            if (cur.y < limit) cur.y = limit;
+          }
           const ctx = u.ctx;
           ctx.save();
           ctx.font = `${12 * dpr}px system-ui, sans-serif`;
@@ -127,7 +146,21 @@ export function TrendChart({ scans, themeKey }: { scans: Summary[]; themeKey: st
       // Vertical crosshair only: readers aim at a date, not at a value.
       cursor: { y: false, points: { size: 9, width: 2, fill: surface }, drag: { x: false, y: false } },
       plugins: [tooltipPlugin, labelPlugin],
-      scales: { x: { time: true }, y: { range: (_u, _min, max) => [0, Math.max(max * 1.1, 5)] } },
+      scales: {
+        // With one scan (or several within a minute) uPlot widens the range by
+        // 86400/ms units itself -- 86.4M seconds, about 2.7 years -- before
+        // this runs, so decide from the data and centre a 2-day window on it.
+        x: {
+          time: true,
+          range: (_u, min, max) => {
+            const first = xs[0];
+            const lastX = xs[xs.length - 1];
+            if (first !== undefined && lastX !== undefined && lastX - first < 60) return [first - 86400, lastX + 86400];
+            return [min, max];
+          },
+        },
+        y: { range: (_u, _min, max) => [0, Math.max(max * 1.1, 5)] },
+      },
       axes: [
         { stroke: ink3, grid: { stroke: grid, width: 1 }, ticks: { stroke: axis, width: 1 }, font: FONT },
         { stroke: ink3, grid: { stroke: grid, width: 1 }, ticks: { show: false }, font: FONT, size: 48 },

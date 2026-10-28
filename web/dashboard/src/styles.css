@@ -372,6 +372,17 @@ input[type="text"] {
   font-weight: 650;
   color: var(--accent-deep);
 }
+/* Ownership couldn't be determined: a status (warning) colour, never the
+   accent, so it can't be mistaken for a healthy result. */
+.hero.warn {
+  border-left-color: var(--warning);
+}
+.hero .reason {
+  color: var(--ink-2);
+  font-size: 13px;
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+}
 .hero-fig {
   font-size: 64px;
   line-height: 1.05;

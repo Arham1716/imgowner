@@ -26,6 +26,8 @@ type Request struct {
 	OutputDir  string   // directory to write files into; "" or "-" = stdout (one format only)
 	Formats    []string // "md", "json", "sarif" (see ParseFormats)
 	Dockerfile string   // Dockerfile path, used as the SARIF artifact location
+	PinsNote   string   // why pins weren't checked, e.g. no container runtime (FR-27)
+	Verdict    string   // policy verdict line for ci (FR-26); empty for attribute
 }
 
 // Stdout is the OutputDir value that writes a single format to standard output.
@@ -177,6 +179,10 @@ func renderMarkdown(w io.Writer, req Request) error {
 			req.Image, req.BaseRef, time.Now().UTC().Format(time.RFC3339))
 	}
 
+	if req.Verdict != "" {
+		ew.printf("**Policy:** %s\n\n", req.Verdict)
+	}
+
 	ew.printf("## CVE attribution\n\n")
 	ew.printf("| Owner | Count |\n|---|---|\n")
 	ew.printf("| base | %d |\n", counts[attribution.OwnerBase])
@@ -226,8 +232,13 @@ func renderMarkdown(w io.Writer, req Request) error {
 		ew.printf("\n")
 	}
 
+	if req.PinsNote != "" {
+		ew.printf("## Pinned OS packages\n\n> %s\n\n", req.PinsNote)
+	}
 	if len(req.Pins) > 0 {
-		ew.printf("## Pinned OS packages\n\n")
+		if req.PinsNote == "" {
+			ew.printf("## Pinned OS packages\n\n")
+		}
 		ew.printf("| Package | Pinned | Available | Status | Line |\n|---|---|---|---|---|\n")
 		for _, p := range req.Pins {
 			avail := p.Available
@@ -310,6 +321,8 @@ type jsonReport struct {
 	Findings    []attribution.Finding `json:"findings"`
 	Candidates  []baserec.Candidate   `json:"base_candidates,omitempty"`
 	Pins        []pins.Pin            `json:"pins,omitempty"`
+	PinsNote    string                `json:"pins_note,omitempty"`
+	Verdict     string                `json:"policy_verdict,omitempty"`
 }
 
 func renderJSON(w io.Writer, req Request) error {
@@ -323,6 +336,8 @@ func renderJSON(w io.Writer, req Request) error {
 		Findings:    req.Findings,
 		Candidates:  req.Candidates,
 		Pins:        req.Pins,
+		PinsNote:    req.PinsNote,
+		Verdict:     req.Verdict,
 	})
 }
 

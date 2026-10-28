@@ -146,3 +146,18 @@ func TestRenderSARIF_UsesTheRealDockerfilePath(t *testing.T) {
 		t.Errorf("SARIF uri = %q, want build/app.Dockerfile", got)
 	}
 }
+
+// FR-26/27: the ci report and PR comment carry the policy verdict and say
+// when the pin check was skipped.
+func TestRenderMarkdown_VerdictAndPinsNote(t *testing.T) {
+	var b strings.Builder
+	err := renderMarkdown(&b, Request{Verdict: "failed — 2 finding(s)", PinsNote: "Pin check skipped — no container runtime detected"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"**Policy:** failed — 2 finding(s)", "> Pin check skipped — no container runtime detected"} {
+		if !strings.Contains(b.String(), want) {
+			t.Errorf("missing %q in:\n%s", want, b.String())
+		}
+	}
+}
