@@ -390,6 +390,9 @@ jobs:
           image: localhost:5000/fx:ci
           dockerfile: ${{ runner.temp }}/fx/Dockerfile
           output-dir: noconfig-report
+          artifact-name: noconfig-report # "scan" above already succeeds and
+          # uploads the default artifact-name; this one would too, and two
+          # uploads under the same name in one job conflict (409).
           upload-sarif: 'false'
 
       - name: The action works with no config file in the repository
