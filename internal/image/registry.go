@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -12,6 +13,31 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 )
+
+// DefaultResolveTimeout bounds a registry lookup (manifest and config — small
+// JSON documents, not image layers) when the caller set no deadline of its
+// own. Before this, a registry that accepted the connection and never
+// answered — or never answered at all — could hang the whole command forever,
+// with no way out short of Ctrl+C. The acceptance suite's own expectation
+// (test/../edge.sh) is that this resolves within about two minutes; this
+// stays comfortably under that.
+//
+// ResolveAny's local-image fallback (`docker image save` of a locally built
+// image, batch 2b) runs under this same bound, which is why it is more
+// generous than a registry round-trip alone would need: `docker save` only
+// copies already-compressed layer blobs to a tarball, no recompression, so
+// even a multi-GB image finishes in well under this on any normal disk.
+const DefaultResolveTimeout = 90 * time.Second
+
+// WithResolveTimeout applies DefaultResolveTimeout unless ctx already has a
+// deadline, mirroring the rule pins.LookupVersions and scan.withVersionTimeout
+// use for their own timeouts.
+func WithResolveTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, DefaultResolveTimeout)
+}
 
 // ImageInfo holds the resolved digest and the full image manifest/config.
 type ImageInfo struct {
@@ -70,22 +96,6 @@ func Resolve(ctx context.Context, imageRef, platform string) (*ImageInfo, error)
 		Digest: digest.String(),
 		Image:  img,
 	}, nil
-}
-
-// Config fetches the image config file, which contains history and rootfs.diff_ids.
-// A base image built locally (FROM an image that was never pushed) is read
-// from the local image store, as for the image being scanned.
-func Config(ctx context.Context, imageRef, platform string) (*v1.ConfigFile, error) {
-	info, err := ResolveAny(ctx, imageRef, platform)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = info.Close() }()
-	cf, err := info.Image.ConfigFile()
-	if err != nil {
-		return nil, fmt.Errorf("imgowner: fetching config for %s: %w", imageRef, err)
-	}
-	return cf, nil
 }
 
 // remoteOpts builds the option slice for go-containerregistry remote calls.

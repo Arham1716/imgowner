@@ -14,12 +14,19 @@ import (
 const maxConcurrency = 3 // FR-10, NFR-08
 
 // Recommend scans up to maxN patch-tag candidates for baseRef in parallel
-// (concurrency capped at 3), diffs their CVE sets against the current base
-// scan, and returns candidates sorted by CVEs removed descending (FR-09, FR-10, FR-11).
+// (concurrency capped at 3), diffs their CVE sets against baseScan, and
+// returns candidates sorted by CVEs removed descending (FR-09, FR-10, FR-11).
+//
+// baseScan must be a scan of the current base image itself, at the exact
+// digest the final image was built from — never a scan of the final image.
+// The final image also carries every CVE from the layers added on top of the
+// base (added-os, app), which no base-image switch can ever remove; passing
+// it here would count those as "removed" by every candidate that happens not
+// to have them, inflating CVEsRemoved for reasons unrelated to the base.
 func Recommend(
 	ctx context.Context,
 	baseRef string,
-	currentScan *scan.Result,
+	baseScan *scan.Result,
 	runner *scan.Runner,
 	platform string,
 	maxN int,
@@ -32,7 +39,7 @@ func Recommend(
 		return nil, nil
 	}
 
-	currentCVEs := cveSet(currentScan)
+	baseCVEs := cveSet(baseScan)
 
 	results := make([]Candidate, len(candidateRefs))
 	for i, ref := range candidateRefs {
@@ -49,7 +56,11 @@ func Recommend(
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			info, err := image.Resolve(gctx, ref, platform)
+			// NFR-01: bound the metadata fetch; the scan just below has its
+			// own bound via runner.Timeout.
+			rctx, cancel := image.WithResolveTimeout(gctx)
+			info, err := image.Resolve(rctx, ref, platform)
+			cancel()
 			if err != nil {
 				results[i].Failed = true
 				results[i].FailReason = err.Error()
@@ -67,7 +78,7 @@ func Recommend(
 
 			candidateCVEs := cveSet(candidateScan)
 			removed := 0
-			for cve := range currentCVEs {
+			for cve := range baseCVEs {
 				if !candidateCVEs[cve] {
 					removed++
 				}
