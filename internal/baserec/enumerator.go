@@ -9,6 +9,8 @@ import (
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+
+	"github.com/Arham1716/imgowner/internal/image"
 )
 
 // Candidate is one base image tag that may remove CVEs relative to the current base.
@@ -34,8 +36,11 @@ func Enumerate(ctx context.Context, baseRef string, maxN int) ([]string, error) 
 	currentTag := ref.Identifier() // e.g. "3.12-slim" or "1.25-alpine"
 	repo := ref.Context()
 
+	// NFR-01: a registry that never answers must not hang the whole command.
+	rctx, cancel := image.WithResolveTimeout(ctx)
+	defer cancel()
 	tags, err := remote.List(repo,
-		remote.WithContext(ctx),
+		remote.WithContext(rctx),
 		remote.WithAuthFromKeychain(authn.DefaultKeychain),
 	)
 	if err != nil {

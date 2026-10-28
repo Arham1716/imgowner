@@ -6,9 +6,27 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/Arham1716/imgowner/internal/safeio"
 )
+
+// defaultVersionTimeout bounds `trivy version`, applied only when the caller
+// set no deadline of its own. It should answer in well under a second; this
+// is generous headroom, not an expected wait. Without it, a stalled trivy
+// process (seen in practice when it tries to phone home for an update check
+// and the network hangs) could block the whole command forever — there was
+// no way out short of Ctrl+C.
+const defaultVersionTimeout = 15 * time.Second
+
+// withVersionTimeout applies defaultVersionTimeout unless ctx already has a
+// deadline, mirroring the rule pins.LookupVersions uses for its own timeout.
+func withVersionTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, defaultVersionTimeout)
+}
 
 // trivyVersion holds the parsed Trivy version output.
 type trivyVersion struct {
@@ -25,6 +43,8 @@ type trivyDB struct {
 // CheckTrivyVersion verifies Trivy is installed and meets the minimum version
 // requirement. Returns a structured error suitable for JSON marshalling (FR-30).
 func CheckTrivyVersion(ctx context.Context, minVersion string) error {
+	ctx, cancel := withVersionTimeout(ctx)
+	defer cancel()
 	cmd := exec.CommandContext(ctx, "trivy", "version", "--format", "json")
 	out, err := safeio.Output(cmd, safeio.MaxToolOutput, "trivy version output")
 	if err != nil {
@@ -55,6 +75,8 @@ func CheckTrivyVersion(ctx context.Context, minVersion string) error {
 
 // InstalledVersion returns the version string reported by the installed Trivy binary.
 func InstalledVersion(ctx context.Context) (string, error) {
+	ctx, cancel := withVersionTimeout(ctx)
+	defer cancel()
 	cmd := exec.CommandContext(ctx, "trivy", "version", "--format", "json")
 	out, err := safeio.Output(cmd, safeio.MaxToolOutput, "trivy version output")
 	if err != nil {
@@ -73,6 +95,8 @@ func InstalledVersion(ctx context.Context) (string, error) {
 // It returns "" when Trivy has no vulnerability DB yet (first run), in which
 // case nothing can be proven fresh and the cache is bypassed.
 func DBStamp(ctx context.Context) (string, error) {
+	ctx, cancel := withVersionTimeout(ctx)
+	defer cancel()
 	cmd := exec.CommandContext(ctx, "trivy", "version", "--format", "json")
 	out, err := safeio.Output(cmd, safeio.MaxToolOutput, "trivy version output")
 	if err != nil {

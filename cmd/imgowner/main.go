@@ -51,6 +51,7 @@ func (e *exitError) Error() string { return e.cause.Error() }
 func (e *exitError) Unwrap() error { return e.cause }
 
 func main() {
+	fillVersionFromBuildInfo()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
