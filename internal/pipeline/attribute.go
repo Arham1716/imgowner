@@ -51,11 +51,40 @@ func Attribute(ctx context.Context, req AttributeRequest) (*AttributeResult, err
 		return nil, fmt.Errorf("pipeline: dockerfile %s: %w", req.DockerfilePath, err)
 	}
 
-	info, err := image.ResolveAny(ctx, req.ImageRef, req.Platform)
+	// Resolving the image and reading its config are both registry metadata
+	// calls — small JSON documents, never the actual scan — so they're kept
+	// under a bounded timeout and done before the (unbounded-by-this-bound,
+	// possibly multi-minute) Trivy scan below. Reading the config afterward
+	// instead would force this same bound to also cover the whole scan, far
+	// too short a ceiling for it.
+	rctx, cancel := image.WithResolveTimeout(ctx)
+	info, err := image.ResolveAny(rctx, req.ImageRef, req.Platform)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 	defer func() { _ = info.Close() }()
+
+	df, err := dockerfile.Parse(req.DockerfilePath)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	finalStage := df.FinalStage()
+	if finalStage == nil {
+		cancel()
+		return nil, fmt.Errorf("pipeline: dockerfile %s declares no stages", req.DockerfilePath)
+	}
+
+	imgCF, err := info.Image.ConfigFile()
+	cancel() // info.Image is never read again past this point
+	if err != nil {
+		return nil, fmt.Errorf("pipeline: reading image config: %w", err)
+	}
+	layerMap, err := image.BuildLayerMap(imgCF)
+	if err != nil {
+		return nil, err
+	}
 
 	runner := &scan.Runner{
 		TrivyVersion: req.TrivyVersion,
@@ -67,26 +96,9 @@ func Attribute(ctx context.Context, req AttributeRequest) (*AttributeResult, err
 		return nil, err
 	}
 
-	df, err := dockerfile.Parse(req.DockerfilePath)
-	if err != nil {
-		return nil, err
-	}
-	finalStage := df.FinalStage()
-	if finalStage == nil {
-		return nil, fmt.Errorf("pipeline: dockerfile %s declares no stages", req.DockerfilePath)
-	}
-
-	imgCF, err := info.Image.ConfigFile()
-	if err != nil {
-		return nil, fmt.Errorf("pipeline: reading image config: %w", err)
-	}
-	layerMap, err := image.BuildLayerMap(imgCF)
-	if err != nil {
-		return nil, err
-	}
-
 	baseRef := df.ResolveBaseRef(finalStage)
-	base := image.ResolveBase(ctx, imgCF, baseRef, req.BaseDigest, req.Platform)
+	base, baseInfo := image.ResolveBaseImage(ctx, imgCF, baseRef, req.BaseDigest, req.Platform)
+	defer func() { _ = baseInfo.Close() }()
 
 	findings := attribution.Classify(result.Results, layerMap, base)
 	findings = attribution.MapToDockerfileLines(findings, layerMap, df)
@@ -100,9 +112,17 @@ func Attribute(ctx context.Context, req AttributeRequest) (*AttributeResult, err
 		Squashed: isSquashed(result),
 	}
 
-	// Recommendation is advisory; a registry failure here must not lose the findings.
-	if req.BaseCandidates > 0 && base.Confident && !image.IsScratch(baseRef) {
-		out.Candidates, _ = baserec.Recommend(ctx, baseRef, result, runner, req.Platform, req.BaseCandidates)
+	// Recommendation is advisory; a registry failure here must not lose the
+	// findings. baseInfo is nil for FROM scratch and for an unresolved base
+	// (base.Confident false in both cases), so this also covers those.
+	if req.BaseCandidates > 0 && base.Confident && baseInfo != nil {
+		if baseScan, err := scanImage(ctx, runner, baseInfo); err == nil {
+			// FR-10: candidates are diffed against the base image's own CVEs,
+			// never the final image's — the final image also carries every
+			// app- and added-os-layer CVE, which a different base can never
+			// remove but would otherwise be counted as "removed".
+			out.Candidates, _ = baserec.Recommend(ctx, baseRef, baseScan, runner, req.Platform, req.BaseCandidates)
+		}
 	}
 
 	return out, nil

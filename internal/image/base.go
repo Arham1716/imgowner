@@ -20,8 +20,17 @@ type BaseResolution struct {
 	Reason     string // why confidence is low; empty when Confident
 }
 
-// ResolveBase determines how many leading layers of finalCF belong to the base
-// image named by baseRef.
+// ResolveBaseImage is ResolveBase, additionally returning the opened
+// ImageInfo for the base image so the caller can scan that exact image —
+// needed for base-image recommendation (FR-10): comparing candidates against
+// the final image's own scan would count every app- and added-os-layer CVE
+// as "removed" by switching base, since a candidate trivially lacks CVEs
+// that were never in the base to begin with.
+//
+// The returned ImageInfo is nil whenever there is nothing to scan (no FROM,
+// FROM scratch, or resolution failed — see BaseResolution.Reason); otherwise
+// the caller must Close it. ImageInfo.Close is nil-safe, so
+// `defer func() { _ = info.Close() }()` is always correct.
 //
 // When digestOverride is non-empty the base image is pinned to that digest,
 // which is the only reliable way to compare against an image built in the past:
@@ -29,6 +38,71 @@ type BaseResolution struct {
 // can yield a different image than the one the final image was actually built
 // from. When the prefix check fails, the returned BaseResolution has
 // Confident=false and an actionable Reason rather than a silent zero count.
+func ResolveBaseImage(
+	ctx context.Context,
+	finalCF *v1.ConfigFile,
+	baseRef string,
+	digestOverride string,
+	platform string,
+) (*BaseResolution, *ImageInfo) {
+	res := &BaseResolution{Ref: baseRef}
+
+	if baseRef == "" {
+		res.Reason = "no FROM reference could be resolved from the Dockerfile"
+		return res, nil
+	}
+	// FROM scratch is Docker's empty base, not an image to fetch: it
+	// contributes no layers, so every layer belongs to the Dockerfile.
+	if IsScratch(baseRef) {
+		res.Confident = true
+		return res, nil
+	}
+
+	ref := baseRef
+	if digestOverride != "" {
+		ref = pinToDigest(baseRef, digestOverride)
+		res.Ref = ref
+	}
+
+	// A base image built locally (FROM an image that was never pushed) is
+	// read from the local image store, as for the image being scanned.
+	//
+	// The bound covers this call and the ConfigFile read just below — the
+	// only two places this function (or its caller) ever touches info.Image —
+	// never anything the caller does with the returned ImageInfo afterward.
+	rctx, cancel := WithResolveTimeout(ctx)
+	defer cancel()
+	info, err := ResolveAny(rctx, ref, platform)
+	if err != nil {
+		res.Reason = fmt.Sprintf("could not fetch base image config for %s: %v", ref, err)
+		return res, nil
+	}
+	res.Digest = info.Digest
+	if digestOverride == "" {
+		res.Ref = info.Ref // the pinned "name@digest" form (or the local tag, for a local base)
+	}
+
+	baseCF, err := info.Image.ConfigFile()
+	if err != nil {
+		res.Reason = fmt.Sprintf("could not read base image config for %s: %v", ref, err)
+		_ = info.Close()
+		return res, nil
+	}
+
+	count, err := BaseLayerCount(finalCF, baseCF)
+	if err != nil {
+		res.Reason = baseMismatchReason(err, digestOverride)
+		_ = info.Close()
+		return res, nil
+	}
+
+	res.LayerCount = count
+	res.Confident = true
+	return res, info
+}
+
+// ResolveBase is ResolveBaseImage for callers that only need the
+// layer-boundary verdict, not the opened image (closed immediately here).
 func ResolveBase(
 	ctx context.Context,
 	finalCF *v1.ConfigFile,
@@ -36,40 +110,8 @@ func ResolveBase(
 	digestOverride string,
 	platform string,
 ) *BaseResolution {
-	res := &BaseResolution{Ref: baseRef}
-
-	if baseRef == "" {
-		res.Reason = "no FROM reference could be resolved from the Dockerfile"
-		return res
-	}
-	// FROM scratch is Docker's empty base, not an image to fetch: it
-	// contributes no layers, so every layer belongs to the Dockerfile.
-	if IsScratch(baseRef) {
-		res.Confident = true
-		return res
-	}
-
-	ref := baseRef
-	if digestOverride != "" {
-		ref = pinToDigest(baseRef, digestOverride)
-		res.Ref = ref
-		res.Digest = digestOverride
-	}
-
-	baseCF, err := Config(ctx, ref, platform)
-	if err != nil {
-		res.Reason = fmt.Sprintf("could not fetch base image config for %s: %v", ref, err)
-		return res
-	}
-
-	count, err := BaseLayerCount(finalCF, baseCF)
-	if err != nil {
-		res.Reason = baseMismatchReason(err, digestOverride)
-		return res
-	}
-
-	res.LayerCount = count
-	res.Confident = true
+	res, info := ResolveBaseImage(ctx, finalCF, baseRef, digestOverride, platform)
+	_ = info.Close()
 	return res
 }
 
