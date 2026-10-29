@@ -9,6 +9,9 @@
   without a committed config file -- the common case. `--config` is now only
   passed when the file exists, unless `imgowner.configPath` was explicitly
   set, in which case a missing file still errors loudly as before.
+- Fixed: the extension had no `icon` in `package.json`, so it showed VS
+  Code's generic placeholder in the Extensions list and would have on the
+  Marketplace page too. Added a proper icon.
 
 ## 0.1.0
 

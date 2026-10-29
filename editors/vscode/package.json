@@ -4,6 +4,7 @@
   "description": "Container CVE attribution and OS package pin updater, inline in your Dockerfile.",
   "version": "0.1.1",
   "publisher": "arham1716",
+  "icon": "resources/icon.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/Arham1716/imgowner.git",
