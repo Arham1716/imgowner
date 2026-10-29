@@ -24,8 +24,24 @@ export function getBinaryPath(): string {
   return vscode.workspace.getConfiguration("imgowner").get<string>("binaryPath") || "imgowner";
 }
 
-export function getConfigPath(): string {
-  return vscode.workspace.getConfiguration("imgowner").get<string>("configPath") || ".imgowner.yaml";
+export function getConfigPath(resource?: vscode.Uri): string {
+  return vscode.workspace.getConfiguration("imgowner", resource).get<string>("configPath") || ".imgowner.yaml";
+}
+
+/**
+ * True when the user actually set imgowner.configPath somewhere (global,
+ * workspace, or workspace-folder settings), as opposed to it merely falling
+ * back to its own declared default. imgowner itself draws the same
+ * distinction for --config: an explicit path must exist (a typo must not be
+ * silently ignored) but the unconfigured default may be absent.
+ */
+export function isConfigPathExplicit(resource?: vscode.Uri): boolean {
+  const inspected = vscode.workspace.getConfiguration("imgowner", resource).inspect<string>("configPath");
+  return (
+    inspected?.globalValue !== undefined ||
+    inspected?.workspaceValue !== undefined ||
+    inspected?.workspaceFolderValue !== undefined
+  );
 }
 
 export function getImageRef(resource?: vscode.Uri): string {
