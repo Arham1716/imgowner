@@ -26,6 +26,22 @@ are flagged on the exact version string.
 - **Pin updates** — rewrite stale `pkg=version` pins in place without touching
   the rest of the file.
 
+## Installation
+
+This extension isn't on the VS Code Marketplace yet — install it from the
+`.vsix` attached to each [GitHub release](https://github.com/Arham1716/imgowner/releases),
+signed the same way as every other release artifact (see
+[Verifying a release](https://github.com/Arham1716/imgowner#verifying-a-release)).
+
+1. Download `imgowner-vscode_X.Y.Z.vsix` from the latest release.
+2. Install it:
+   ```sh
+   code --install-extension imgowner-vscode_X.Y.Z.vsix
+   ```
+   or, from VS Code: Extensions view → `...` menu → **Install from VSIX...**.
+3. Update the same way when a new release ships — reinstalling with `--force`
+   overwrites the old version.
+
 ## Requirements
 
 The extension drives the `imgowner` CLI; it doesn't bundle it.
