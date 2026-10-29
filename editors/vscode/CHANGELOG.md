@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.1
+
+- Fixed: every command (attribute, pins check, pins update) always passed
+  `--config .imgowner.yaml` to the CLI, even when no such file existed.
+  imgowner treats an explicitly-named `--config` as required to exist (a
+  typo'd path must not be silently ignored), so this failed in any workspace
+  without a committed config file -- the common case. `--config` is now only
+  passed when the file exists, unless `imgowner.configPath` was explicitly
+  set, in which case a missing file still errors loudly as before.
+
 ## 0.1.0
 
 Initial release.

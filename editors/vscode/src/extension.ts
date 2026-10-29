@@ -1,6 +1,7 @@
+import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
-import { CLIError, getConfigPath, getImageRef, run, runJSON } from "./cliRunner";
+import { CLIError, getConfigPath, getImageRef, isConfigPathExplicit, run, runJSON } from "./cliRunner";
 import { buildFindingDiagnostics, buildPinDiagnostics } from "./diagnostics";
 import { ImgownerHoverProvider } from "./hoverProvider";
 import { AttributionState } from "./state";
@@ -89,7 +90,7 @@ async function attribute(doc: vscode.TextDocument): Promise<void> {
 
   await exclusive(doc, "attribute", "Attributing CVEs (this scans the image and can take a few minutes)…", async () => {
     const { data: report, warnings } = await runJSON<JSONReport>(
-      ["attribute", "--image", image, "--dockerfile", doc.uri.fsPath, "--format", "json", "--config", resolveConfig(doc)],
+      ["attribute", "--image", image, "--dockerfile", doc.uri.fsPath, "--format", "json", ...configArgs(doc)],
       cwdFor(doc),
       output,
     );
@@ -121,7 +122,7 @@ async function checkPins(doc: vscode.TextDocument, opts: { quiet?: boolean } = {
     "Checking pinned package versions…",
     async () => {
       const { data, warnings } = await runJSON<Pin[] | null>(
-        ["pins", "check", "--dockerfile", doc.uri.fsPath, "--format", "json", "--config", resolveConfig(doc)],
+        ["pins", "check", "--dockerfile", doc.uri.fsPath, "--format", "json", ...configArgs(doc)],
         cwdFor(doc),
         output,
       );
@@ -153,7 +154,7 @@ async function updatePins(doc: vscode.TextDocument): Promise<void> {
 
   await exclusive(doc, "pins", "Updating pinned package versions…", async () => {
     const { stdout, warnings } = await run(
-      ["pins", "update", "--dockerfile", doc.uri.fsPath, "--config", resolveConfig(doc)],
+      ["pins", "update", "--dockerfile", doc.uri.fsPath, ...configArgs(doc)],
       cwdFor(doc),
       output,
     );
@@ -297,7 +298,22 @@ function cwdFor(doc: vscode.TextDocument): string {
   return vscode.workspace.getWorkspaceFolder(doc.uri)?.uri.fsPath ?? path.dirname(doc.uri.fsPath);
 }
 
-function resolveConfig(doc: vscode.TextDocument): string {
-  const configured = getConfigPath();
-  return path.isAbsolute(configured) ? configured : path.join(cwdFor(doc), configured);
+/**
+ * imgowner requires an explicitly-named --config to exist (so a typo'd path
+ * isn't silently ignored), but the setting's own default (".imgowner.yaml")
+ * is the common case where no config file is committed at all -- passing it
+ * unconditionally would fail every such workspace. So: an explicitly-set
+ * imgowner.configPath is always passed, letting imgowner error loudly if
+ * it's missing (the same "don't silently ignore a typo" guarantee the CLI
+ * gives); the unconfigured default is only passed when the file actually
+ * exists, so imgowner's built-in defaults apply otherwise -- exactly as
+ * running the CLI with no --config flag does.
+ */
+function configArgs(doc: vscode.TextDocument): string[] {
+  const configured = getConfigPath(doc.uri);
+  const resolved = path.isAbsolute(configured) ? configured : path.join(cwdFor(doc), configured);
+  if (isConfigPathExplicit(doc.uri) || fs.existsSync(resolved)) {
+    return ["--config", resolved];
+  }
+  return [];
 }
