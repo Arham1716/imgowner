@@ -10,7 +10,7 @@ retract v0.1.0
 
 require (
 	github.com/google/go-containerregistry v0.22.1
-	github.com/moby/buildkit v0.34.1
+	github.com/moby/buildkit v0.34.2
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/sync v0.23.0
 	golang.org/x/sys v0.49.0
