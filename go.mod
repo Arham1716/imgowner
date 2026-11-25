@@ -10,16 +10,16 @@ retract v0.1.0
 
 require (
 	github.com/google/go-containerregistry v0.22.1
-	github.com/moby/buildkit v0.34.1
+	github.com/moby/buildkit v0.35.1
 	github.com/spf13/cobra v1.10.2
-	golang.org/x/sync v0.23.0
-	golang.org/x/sys v0.49.0
+	golang.org/x/sync v0.24.0
+	golang.org/x/sys v0.50.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
 	github.com/containerd/typeurl/v2 v2.3.0 // indirect
-	github.com/docker/cli v29.9.2+incompatible // indirect
+	github.com/docker/cli v29.9.3+incompatible // indirect
 	github.com/docker/docker-credential-helpers v0.9.9 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/klauspost/compress v1.20.3 // indirect
